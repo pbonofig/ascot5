@@ -7,10 +7,9 @@ import numpy as np
 import unyt
 from a5py.ascot5io.options import Opt
 import subprocess
+import fortranformat as ff
 
-#from a5py.ascotpy.libascot import _LIBASCOT, STRUCT_DIST5D, STRUCT_AFSIDATA, \
-#    STRUCT_AFSITHERMAL, PTR_REAL, AFSI_REACTIONS
-#from a5py.exceptions import AscotNoDataException
+#PRINT UPDATE STATEMENTS
 
 class Orbitkicks():
     """
@@ -67,13 +66,13 @@ class Orbitkicks():
         de_max : float [eV]
             Maximum change in energy. Default 2e-6 eV
         de_bins : int
-            Number of bins in kick energy array. Default is 29
+            Number of bins in kick energy array. Default is 29; must be odd!
         dpz_min : float [unitless]
             Minimum change in momentum. Default 1e-8
         dpz_max : float [unitless]
             Minimum change in  momentum. Default 2e-8
         dpz_bins : int
-            Number of bins in kick momentum array. Default is 29
+            Number of bins in kick momentum array. Default is 29; must be odd!
         """
         #make storage for kicks
         if update == False:
@@ -100,15 +99,7 @@ class Orbitkicks():
 
         #check pdedp_bdry here before run
 
-        #set some run options
-        opt = self.data.options.active.read()
-        opt.new({
-            "SIM_MODE":sim_mode,"ENABLE_ADAPTIVE":1,
-            "RECORD_MODE":sim_mode-1,"ENDCOND_SIMTIMELIM":1,
-            "ENDCOND_MAX_MILEAGE":trun,"ENABLE_ORBIT_FOLLOWING":1,
-            "ENABLE_ORBIT_COLLISIONS":0,"ENABLE_MHD":1
-        })
-        #self.data.create_input("opt",**opt,desc="ORBITKICK_ITER")
+        #check some run options??
 
         #check for too short run
         trun = opt['ENDCOND_MAX_MILEAGE']
@@ -169,6 +160,8 @@ class Orbitkicks():
 
             #calculate and histogram kicks
 
+            #checkDEDPz after every loop
+
         #loop has ended and we have finished all simulations
         
         #normalize matrices
@@ -176,6 +169,8 @@ class Orbitkicks():
         #sparse rep
 
         #write ufile
+        write_kick_ufile(dtsamp,e_arr,mu_arr,pz_arr,de_arr,dp_arr,
+                         pdedp,ami=anum_arr[0],zmi=znum_arr[0])
         
         return
 
@@ -309,6 +304,268 @@ class Orbitkicks():
     #def check_dedp():
     #    return
 
-    #def write_kick_ufile():
-    #    return
+    def write_kick_ufile(dtsamp,e_arr,mu_arr,pz_arr=29,
+                         de_arr,dp_arr,pdedp,ami=2,zmi=1,
+                         myfile='pDEDP.AEP'):
+        """
+        Parameters
+        ----------
+        dtsamp : float [s]
+            Sampling time step in seconds
+        e_arr : float array
+            Array of energy values in Roscoe units
+        mu_arr : float array
+            Array of mu values in Roscoe units
+        pz_arr : float array
+            Array of pz values in Roscoe units
+        de_arr : float array
+            Array of DE kicks in Roscoe units
+        dp_arr : float array
+            Array of DP kicks in Roscoe units
+        pdedp : float array
+            5D phase-space matrix
+        ami : int
+            Atomic mass number of ion. Default is 2 for deuterium
+        zmi : int
+            Atmoic charge number of ion. Default is 1 for deuterium
+        myfile : string 
+            Ufile containing orbit kicks to write to. Default is pDEDP.AEP
+        """
+        #print start
+        print('Writing kick output to '+myfile+'\n')
+        
+        #header information
+        lshot=123456
+        nd=5	#5-D data
+	nq=0	#unknown parameter...
+	nr=6	#number of decimal places f13.6
+	np=0	#representation, 0:full, 1:sparse (set below)
+	ns=1	#number  of scalars
+
+        dev='DEV'
+	labelx='DEstep                '	#c*20
+	unitsx='   kev    '		#c*10
+	labely='DPsteps               '	#c*20
+	unitsy='          '		#c*10
+	labelu='Evar                  '	#c*20
+	unitsu='   keV    '		#c*10
+	labelv='Pvar                  '	#c*20
+	unitsv='          '		#c*10
+	labelw='Muvar                '	#c*20
+	unitsw='          '		#c*10
+
+        #footer information
+        com=';----END-OF-DATA-----------------COMMENTS:-----------'
+	com2='UFILE WRITTEN BY ASCOT, see WRITE_KICK_UFILE'
+	com3='SMOOTHING FACTORS, DELAY FACTORS:'
+	com4='       NONE'
+	com5='USER COMMENTS:'
+	com6='       ASCOT FILE'
+
+        #make date
+        today = datetime.today()
+        month = today.strftime("%b")
+        day = today.strftime("%d")
+        year = today.strftime("%y")
+        date = year+'-'+month+'-'+day
+
+        #create file
+        f = open(myfile,"w")
+
+        #line 1
+        f.write(' '+str(lshot)+dev+str(nd)+'  '+str(nq)+' '+str(nr)+'          ')
+        f.write(";-SHOT #- F(X) DATA -PDEDP_OUT- "+date+'\n')
+
+        #line 2
+        f.write('  '+date+'             ')
+        f.write(';-SHOT DATE-  UFILES ASCII FILE SYSTEM'+'\n')
+
+        #line 3
+        f.write('   '+str(ns)+'                    ')
+        f.write(';-NUMBER OF ASSOCIATED SCALAR QUANTITIES-'+'\n')
+
+        #line 4
+        #fast ion species
+        if ami==1 and zmi==1:
+            spec = 5 
+            specstr = ';proton'
+        elif ami=2 and zmi=1:
+            spec = 1 
+            specstr = 'deuterium'
+        elif ami=3 andd zmi=1:
+            spec = 2 
+            specstr = ';tritium'
+        elif ami=3 and zmi=2:
+            spec = 3 
+            specstr = ';HE3 FUSN'
+        elif ami=4 and zmi=2:
+            spec = 4 
+            specstr = ';HE4 FUSN'
+        else:
+            spec = 0 
+            specstr = ';all fast ions'
+        
+        f.write(' '+str(spec)+'                        ')
+        f.write(specstr+'\n')
+        
+        #line 5
+        f.write(' '+labelx+unitsx+';-INDEPENDENT VARIABLE LABEL: X-'+'\n')
+
+        #line 6
+        f.write(' '+labely+unitsy+';-INDEPENDENT VARIABLE LABEL: Y-'+'\n')
+
+        #line 7
+        f.write(' '+labelu+unitsu+';-INDEPENDENT VARIABLE LABEL: U-'+'\n')
+
+        #line 8
+        f.write(' '+labelv+unitsv+';-INDEPENDENT VARIABLE LABEL: V-'+'\n')
+
+        #line 9
+        f.write(' '+labelw+unitsw+';-INDEPENDENT VARIABLE LABEL: W-'+'\n')
+
+        #line 10
+        dtsamp *= 1000.0
+        f.write('  '+str(dtsamp)+'          ')
+        f.write('; TSTEPSIM  - TIME STEP USED IN SIMULATION [ms]'+'\n')
+
+        #line 11
+        f.write(' PROBABILITY DATA              ;-DEPENDENT VARIABLE LABEL-'+'\n')
+
+        #line 12
+        f.write(' 1                    ')
+        f.write(';-REPRESENTATION - 0:FULL 1:SPARSE'+'\n')
+
+        #line 13
+        f.write('         '+str(len(de_arr))+'          ')
+        f.write(';-# OF X PTS-'+'\n')
+
+        #line 14
+        f.write('         '+str(len(dpz_arr))+'          ')
+        f.write(';-# OF Y PTS-'+'\n')
+
+        #line 15
+        f.write('         '+str(len(e_arr))+'          ')
+        f.write(';-# OF U PTS-'+'\n')
+
+        #line 16
+        f.write('         '+str(len(pz_arr))+'          ')
+        f.write(';-# OF V PTS-'+'\n')
+
+        #line 17
+        f.write('         '+str(len(mu_arr))+'          ')
+        f.write(';-# OF W PTS- X,Y,U,V,W,F(X,Y,U,V,W) DATA FOLLOW:'+'\n')
+
+        #make sure center bin for (DE,DP)=(0,0)
+        inde = np.argmin(np.abs(de_arr))
+        indp = np.argmin(np.abs(dpz_arr))
+        de_arr[inde] = 0.0
+        dpz_arr[indp] = 0.0
+
+        #write 1D data
+        hh = ff.FortranRecordWriter('(6e14.6)')
+        f.write(hh.write(de_arr))
+        f.write('\n')
+        f.write(hh.write(dpz_arr))
+        f.write('\n')
+        f.write(hh.write(e_arr))
+        f.write('\n')
+        f.write(hh.write(pz_arr))
+        f.write('\n')
+        f.write(hh.write(mu_arr))
+        f.write('\n')
+
+        #write 5D matrix, only write non-zero elements, i.e. sparse matrix
+        for i in range(0,len(e_arr)):
+            for j in range(0,len(pz_arr)):
+                for k in range(0,len(mu_arr)):
+                    for m in range(0,len(de_arr)):
+                        for n in range(0,len(dpz_arr)):
+                            val = pdedp[i,j,k,m,n]
+                            if val != 0.0:
+                                f.write(m+1,n+1,i+1,j+1,k+1,hh.write([val]))
+
+        #print footer information
+        f.write(com+'\n')
+        f.write(com2+'\n')
+        f.write(com3+'\n')
+        f.write(com4+'\n')
+        f.write(com5+'\n')
+        f.write(com6+'\n')
+        
+        f.close()
+
+        #print end
+        print('Finished writing kick output to '+myfile+'\n')
+        
+        return
     
+    def pdedp_finalize(pdedp,de_arr,dpz_arr):
+        """
+        Parameters
+        ----------
+        dtsamp : float [s]
+            Sampling time step in seconds
+        e_arr : float array
+            Array of energy values in Roscoe units
+        mu_arr : float array
+            Array of mu values in Roscoe units
+        pz_arr : float array
+            Array of pz values in Roscoe units
+        de_arr : float array
+            Array of DE kicks in Roscoe units
+        dp_arr : float array
+            Array of DP kicks in Roscoe units
+        pdedp : float array
+            5D phase-space matrix
+        ami : int
+            Atomic mass number of ion. Default is 2 for deuterium
+        zmi : int
+            Atmoic charge number of ion. Default is 1 for deuterium
+        myfile : string 
+            Ufile containing orbit kicks to write to. Default is pDEDP.AEP
+        """
+        #print start
+        print('Finalizing pDEDP computation'+'\n')
+
+        #make sure (DE,DP)=(0,0)
+        inde = np.argmin(np.abs(de_arr))
+        indp = np.argmin(np.abs(dpz_arr))
+        de_arr[inde] = 0.0
+        dpz_arr[indp] = 0.0
+
+        #get average counts/bin from non-empty bins
+        #fill in empty bins with unity
+        nbins = 0
+        cnt_avg = 0
+        sum_p = np.zeros(len(e_arr),len(pz_arr),len(mu_arr))
+        for i in range(0,len(e_arr)):
+            for j in range(0,len(pz_arr)):
+                for k in range(0,len(mu_arr)):
+                    cnt = 0
+                    sum_p[i,j,k] = 0
+                    for m in range(0,len(de_arr)):
+                        for n in range(0,len(dpz_arr)):
+                            cnt += pdedp[i,j,k,m,n]
+
+                    if cnt > 0:
+                        cnt_avg += cnt
+                        sum_p[i,j,k] += cnt
+                        nbins += 1
+                    else:
+                        pdedp[i,j,k,inde,indp] = 1.0
+                        sum_p[i,j,k] = 1.0
+
+        if nbins > 0:
+            cnt_avg /= nbins
+                
+        #Normalize all probabilities to average number of counts/bin
+        for i in range(0,len(e_arr)):
+            for j in range(0,len(pz_arr)):
+                for k in range(0,len(mu_arr)):
+                    pdedp[i,j,k,:,:] *= cnt_avg/sum_p[i,j,k]
+
+        #print end
+        print('pDEDP matrices normalized'+'\n')
+        print('Average number of counts: '+str(cnt_avg)+'\n')
+        
+        return
