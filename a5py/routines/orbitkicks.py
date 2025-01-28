@@ -26,8 +26,8 @@ class Orbitkicks():
                 e_min=1000.0,e_max=150.0e3,e_bins=15,
                 pz_min=-1.2,pz_max=1.0,pz_bins=40,
                 mu_min=0.0,mu_max=1.4,mu_bins=16,
-                de_min=1.0e-6,de_max=2.0e-6,de_bins=29,
-                dpz_min=1.0e-8,dpz_max=2.0e-8,dpz_bins=29):
+                de_min=-1.0e-6,de_max=1.0e-6,de_bins=29,
+                dpz_min=-1.0e-8,dpz_max=1.0e-8,dpz_bins=29):
         """
         Parameters
         ----------
@@ -105,7 +105,7 @@ class Orbitkicks():
                 print('Reading from old pDEDP but sampling times do not match')
                 print('Aborting')
                 return
-
+            
         #check some run options??
 
         #check for too short run
@@ -146,12 +146,13 @@ class Orbitkicks():
                 self.input_init(bfield=True)
 
                 #get constants of motion vs. time
-                eorb,torb,muorb,pzorb,rhoorb = self.data.active.getorbit("ekin",
-                                                                         "time",
-                                                                         "mu",
-                                                                         "ptor",
-                                                                         "rho",
-                                                                         ids=id_arr[j])
+                eorb,torb,muorb,pzorb,rhoorb,wgts = self.data.active.getorbit("ekin",
+                                                                              "time",
+                                                                              "mu",
+                                                                              "ptor",
+                                                                              "rho",
+                                                                              "wgts"
+                                                                              ids=id_arr[j])
                 self.input_free()
 
                 #limit calculations before marker is lost
@@ -159,14 +160,17 @@ class Orbitkicks():
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
                 pzorb = pzorb[tind] #[amu*m**2/s]
-                rhoorb = rhoorb[tind] #psipol/psipol(a)
+                rhoorb = rhoorb[tind] #[psipol/psipol(a)]
+                wgts = wgts[tind] #[#/s]
+                torb = torb[tind] #[s]
 
                 #limit to rho<1; limit_psi in ORBIT
                 rind = np.where(rhoorb < 1.0)[0]
                 eorb = eorb[rind]
                 muorb = muorb[rind]
                 pzorb = pzorb[rind]
-                rhoorb = rhoorb[rind]
+                wgts = wgts[rind]
+                torb = torb[tind]
 
                 #convert to Roscoe units
                 eorb = convert_en(eorb,anum=anum_arr[j],znum=znum_arr[j],bcenter=bcenter)
@@ -174,10 +178,11 @@ class Orbitkicks():
                 pzorb = convert_pz(pzorb)
 
             #calculate and histogram kicks
+            #pdedp_record()
 
-            #checkDEDPz ranges only on first loop after kick calcs
-            #if pdedp_optimize = True:
-            #pdedp_checkDEDP
+            #check (DE,DPz) ranges only on first loop after kick calcs
+            if pdedp_optimize = True:
+                #check_DEDP(pdedp,
 
             #print end of loop
             print('Completed iteration '+str(iloop+1)+'/'+str(nloop))
@@ -301,7 +306,7 @@ class Orbitkicks():
         
         return pde_maxDE,pde_maxDPz
 
-    def check_pDEDP(pde_maxDE,pde_maxDPz,DEmax,DPzmax):
+    def check_DEDP(pde_maxDE,pde_maxDPz,DEmax,DPzmax):
         """
         Parameters
         ----------
@@ -339,9 +344,9 @@ class Orbitkicks():
             DEmax = (1.0+fracE)*DEmax
             DPzmax = (1.0+fracPz)*DPzmax
 
-            #round off
-            DEmax = 1e-6*()
-            DPzmax = 1e-8*()
+            #round off (doesn't need to preserve precision)
+            DEmax = 1e-6*(int(np.ceil(1e6*DEmax)))
+            DPzmax = 1e-8*(int(np.ceil(1e8*DPzmax)))
 
             #symmetric grid
             DEmin = -1*DEmax
@@ -352,6 +357,15 @@ class Orbitkicks():
             print('original (DE,Dpz): ('+str(DEmax_old)+,+str(DPzmax_old)+')')
             print('updated (DE,Dpz): ('+str(DEmax)+,+str(DPzmax)+')')
             print('')
+
+            #define new grid
+            n_e,n_pz,n_mu,n_de,n_dpz = pdedp.shape
+            de_arr = np.linspace(-1*DEmax,DEmax,n_de)
+            dpz_arr = np.linspace(-1*DPzmax,DPzmax,n_dpz)
+
+            recompute = True #???
+            pdedp *= 0.0 #reset pDEDP???
+            #call pdedp_rcrd_resid; think is record values with new de_arr and dpz_arr
 
         #print end
         print()
@@ -708,6 +722,16 @@ class Orbitkicks():
         #print end
         print('pDEDP matrices normalized')
         print('Average number of counts: '+str(cnt_avg))
+        print('')
+        
+        return
+
+    def pdedp_record():
+        #time value to average and reduce high freq noise
+        dtav = dtsamp/50 #[s]
+
+        #print start
+        print('Computing p(DE,DP) matrix...')
         print('')
         
         return
