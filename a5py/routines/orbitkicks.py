@@ -9,8 +9,6 @@ from a5py.ascot5io.options import Opt
 import subprocess
 import fortranformat as ff
 
-#PRINT UPDATE STATEMENTS
-
 class Orbitkicks():
     """
     Some explination will go here
@@ -81,8 +79,8 @@ class Orbitkicks():
             mu_arr = np.linspace(mu_min,mu_max,mu_bins)
             pz_arr = np.linspace(pz_min,pz_max,pz_bins)
             de_arr = np.linspace(de_min,de_max,de_bins)
-            dp_arr = np.linspace(dp_min,dp_max,dp_bins)
-            pdedp = np.zeros(e_bins,pz_bins,mu_bins,de_bins,dpz_bins)
+            dpz_arr = np.linspace(dpz_min,dpz_max,dpz_bins)
+            pdedp = np.zeros([e_bins,pz_bins,mu_bins,de_bins,dpz_bins])
             pdedp_optimize = True
             pde_maxDE = 0.0
             pde_maxDPz = 0.0
@@ -93,11 +91,20 @@ class Orbitkicks():
             mu_arr = data['mu']
             pz_arr = data['pphi']
             de_arr = data['dE']
-            dp_arr = data['dP']
+            dpz_arr = data['dP']
             pdedp = data['f']
+            dtsamp_old = data['dtsamp']
+            spec_old = data['spec']
             pdedp_optimize = False
 
-        #check pdedp_bdry here before run
+            pde_maxDE,pde_maxDPz = find_maxDEDP(pdedp,de_arr,dpz_arr)
+
+            #check sampling time matches
+            if dtsamp_old != dtsamp:
+                print('Warning')
+                print('Reading from old pDEDP but sampling times do not match')
+                print('Aborting')
+                return
 
         #check some run options??
 
@@ -110,7 +117,14 @@ class Orbitkicks():
             return
 
         #loop over sub-simulations and calculate kicks
-        for iloop i range(0,nloop):
+        for iloop in range(0,nloop):
+            #print beginning of loop
+            print('Starting iteration '+str(iloop+1))
+
+            #only optimize first loop to avoid over interpolation of kicks
+            if iloop > 0:
+                pdep_optimize = False
+        
             #initialize markers
             #focusdep??
 
@@ -118,10 +132,13 @@ class Orbitkicks():
             subprocess.run(["where is executable"])
 
             #get marker ids, mass, and lost times
-            id_arr = self.data.active.getstate("ids")
+            id_arr = self.data.active.getstate("ids") #particle IDs
             anum_arr = self.data.active.getstate("anum") #atomic mass num
             znum_arr = self.data.active.getstate("znum") #atomic charge num
-            t_fin = self.data.active.getstate("time",state="end") #[s]
+            t_fin = self.data.active.getstate("time",state="end") #end time [s]
+
+            #check kick ranges based on inputs only on first loop
+            #if pdedp_optimize = True:
 
             #get CoM as function of time for every marker
             for j in range(0,len(id_arr)):
@@ -144,7 +161,7 @@ class Orbitkicks():
                 pzorb = pzorb[tind] #[amu*m**2/s]
                 rhoorb = rhoorb[tind] #psipol/psipol(a)
 
-                #limit to rho<1; limi_psi in ORBIT
+                #limit to rho<1; limit_psi in ORBIT
                 rind = np.where(rhoorb < 1.0)[0]
                 eorb = eorb[rind]
                 muorb = muorb[rind]
@@ -152,29 +169,32 @@ class Orbitkicks():
                 rhoorb = rhoorb[rind]
 
                 #convert to Roscoe units
-                eorb = convert_en(eorb,anum=anum_arr[j],znum=znum_arr[j])
-                muorb = convert_mu(muorb,eorb)
+                eorb = convert_en(eorb,anum=anum_arr[j],znum=znum_arr[j],bcenter=bcenter)
+                muorb = convert_mu(muorb,eorb,bcenter=bcenter)
                 pzorb = convert_pz(pzorb)
-
-            #optimize only first loop
 
             #calculate and histogram kicks
 
-            #checkDEDPz after every loop
+            #checkDEDPz ranges only on first loop after kick calcs
+            #if pdedp_optimize = True:
+            #pdedp_checkDEDP
 
-        #loop has ended and we have finished all simulations
+            #print end of loop
+            print('Completed iteration '+str(iloop+1)+'/'+str(nloop))
+            print('')
+
+        #loops have ended and we have finished all simulations
         
         #normalize matrices
-
-        #sparse rep
+        pdedp_finalize(pdedp,de_arr,dpz_arr)
 
         #write ufile
-        write_kick_ufile(dtsamp,e_arr,mu_arr,pz_arr,de_arr,dp_arr,
+        write_pdedp_ufile(dtsamp,e_arr,mu_arr,pz_arr,de_arr,dpz_arr,
                          pdedp,ami=anum_arr[0],zmi=znum_arr[0])
         
         return
 
-    def check_en(myen,anum=2.0,znum=1.0):
+    def convert_en(myen,anum=2.0,znum=1.0,bcenter):
         """
         Parameters
         ----------
@@ -184,6 +204,8 @@ class Orbitkicks():
             Atomic mass number of ion
         znum : int
             Atmoic charge of ion
+        bcenter : float [T]
+            Magnetic field on axis
 
         Eprime = ke*E, where E is in keV and
         ke = 1000*A*(mp/qe)*g_0**2/(R_0*Z_p*B_0)**2
@@ -204,7 +226,7 @@ class Orbitkicks():
         
         return myen
 
-    def convert_mu(mymu,myen):
+    def convert_mu(mymu,myen,bcenter):
         """
         Parameters
         ----------
@@ -212,6 +234,8 @@ class Orbitkicks():
             Magnetic moment to convert to Roscoe units.
         myen : float 
             Energy already converted to Roscoe units.
+        bcenter : float [T]
+            Magnetic field on axis
 
         muprime = mu*B_0_E, where E is in Roscoe units (ke*E)
         ke = 1000*A*(mp/qe)*g_0**2/(R_0*Z_p*B_0)**2
@@ -247,6 +271,93 @@ class Orbitkicks():
         
         return
 
+    def find_maxDEDP(pdedp,de_arr,dpz_arr):
+        """
+        Parameters
+        ----------
+        pdedp : float array
+            5D kick matrices
+        de_arr : float array
+            Array for dE kicks
+        dpz_arr: float array
+            Array for dPz kicks
+        """
+        #initialize variables
+        pde_maxDE = 0.0
+        pde_maxDPz = 0.0
+
+        n_e,n_pz,n_mu,n_de,n_dpz = pdedp.shape
+
+        for i in range(0,n_e):
+            for j in range(0,n_pz):
+                for k in range(0,n_mu):
+                    for m in range(0,n_de):
+                        for n in range(0,n_dpz):
+                            if pdedp[i,j,k,n,m] > 0:
+                                if abs(de_arr[m]) > pde_maxDE:
+                                    pde_maxDE = de_arr[m]
+                                if abs(dpz_arr[n]) > pde_maxDPz:
+                                    pde_maxDPz = dpz_arr[n]
+        
+        return pde_maxDE,pde_maxDPz
+
+    def check_pDEDP(pde_maxDE,pde_maxDPz,DEmax,DPzmax):
+        """
+        Parameters
+        ----------
+        pde_maxDE : float
+        pde_maxDPz : float
+        DEmax : float
+        DPzmax : float
+        
+        Check the range used for computing p(DE,DP|E,Pz,mu)
+        and adjust the (DE,DPz) range on-the-fly to optimize
+        the sampling
+        """
+        #print start
+        print('Checking (DE,DPz) boundaries...')
+        print('')
+        
+        #threshold limit to alter grid
+        dthresh = 0.1
+
+        #check fractional size if DE,DPz ranges need to be updated
+        fracE = (pde_maxDE-DEmax)/DEmax
+        fracPz = (pde_maxDPz-DPzmax)/DPzmax
+
+        if(abs(fracE)<dthresh and abs(fracPz)<dthresh and
+           fracE <= 1.0 and fracPz <= 1.0):
+            #grid okay
+            print('(DE,DPz) grid looks ok - not updating')
+            print('')
+        else:
+            #keep copy
+            DEmax_old = DEmax
+            DPzmax_old = DPzmax
+
+            #new values
+            DEmax = (1.0+fracE)*DEmax
+            DPzmax = (1.0+fracPz)*DPzmax
+
+            #round off
+            DEmax = 1e-6*()
+            DPzmax = 1e-8*()
+
+            #symmetric grid
+            DEmin = -1*DEmax
+            DPzmin = -1*DPzmax
+
+            #print new grid info
+            print('New (DE,DPz) grid computed')
+            print('original (DE,Dpz): ('+str(DEmax_old)+,+str(DPzmax_old)+')')
+            print('updated (DE,Dpz): ('+str(DEmax)+,+str(DPzmax)+')')
+            print('')
+
+        #print end
+        print()
+        
+        return
+
     def read_pdedp_ufile(myfile='pDEDP.AEP'):
         """
         Parameters
@@ -254,58 +365,94 @@ class Orbitkicks():
         myfile : string 
             Ufile containing orbit kicks. Default is pDEDP.AEP
         """
+        #print start
+        print('Reading kick matrices from '+myfile)
+        print('')
+        
         with open(myfile) as fp:
-        lines = fp.readlines()
+            lines = fp.readlines()
 
-        tstep = float(lines[9].split()[0])*1000.0 #microsec
-        
-        nde = int(lines[12].split()[0])
-        ndp = int(lines[13].split()[0])
-        ne = int(lines[14].split()[0])
-        npp = int(lines[15].split()[0])
-        nm = int(lines[16].split()[0])
+            #read particle type
+            spec = int(lines[3].split()[0])
 
-        e = np.zeros(ne)
-        p = np.zeros(npp)
-        m = np.zeros(nm)
-        de = np.zeros(nde)
-        dp = np.zeros(ndp)
-        f = np.zeros([ne,npp,nm,nde,ndp])
+            #read sampling time
+            tsamp = float(lines[9].split()[0])/1000.0 #[s]
 
-        lstart = 17 #skip header stuff
-        dl = len(lines[17].split())
-        de,lstart = read_arr1d(lines,lstart,dl,de)
-        dp,lstart = read_arr1d(lines,lstart,dl,dp)
-        e,lstart = read_arr1d(lines,lstart,dl,e)
-        p,lstart = read_arr1d(lines,lstart,dl,p)
-        m,lstart = read_arr1d(lines,lstart,dl,m)
-       
-        for i in range(0,ne):
-            for j in range(0,npp):
-                for k in range(0,nm):
-                    for l in range(0,nde):
-                        f[i,j,k,l,:],lstart = read_arr1d(lines,lstart,dl,
-                                                         f[i,j,k,l,:])
+            #array sizes
+            nde = int(lines[12].split()[0])
+            ndpz = int(lines[13].split()[0])
+            ne = int(lines[14].split()[0])
+            npz = int(lines[15].split()[0])
+            nmu = int(lines[16].split()[0])
+
+            #storage
+            e_arr = np.zeros(ne)
+            p_arr = np.zeros(npz)
+            mu_arr = np.zeros(nm)
+            de_arr = np.zeros(nde)
+            dpz_arr = np.zeros(ndpz)
+            pdedp = np.zeros([ne,npz,nmu,nde,ndpz])
+
+            #read 1D arrays
+            lstart = 17 #skip header stuff
+            dl = len(lines[17].split())
+            de,lstart = read_arr1d(lines,lstart,dl,de_arr)
+            dp,lstart = read_arr1d(lines,lstart,dl,dpz_arr)
+            e,lstart = read_arr1d(lines,lstart,dl,e_arr)
+            p,lstart = read_arr1d(lines,lstart,dl,pz_arr)
+            m,lstart = read_arr1d(lines,lstart,dl,mu_arr)
+
+            #read 5D matrix till footer
+            for i in range(lstart,len(lines)-6):
+                myline = lines[i].split()
+                ind_de = int(myline[0])-1 #python indexing at 0
+                ind_dpz = int(myline[1])-1
+                ind_e = int(myline[2])-1
+                ind_pz = int(myline[3])-1
+                ind_mu = int(myline[4])-1
+                val = float(myline[5])-1
+                pdedp[ind_e,ind_pz,ind_mu,ind_de,ind_dpz] = val
+                
         fp.close()
+
+        #print end
+        print('Finished reading '+myfile)
+        print('')
         
-        struct = {'E':e,'pphi':p,'mu':m,'dE':de,'dP':dp,'f':f,'tstep':tstep}
+        struct = {'e_arr':e_arr,'pz_arr':pz_arr,'mu_arr':mu_arrr,
+                  'de_arr':de_arr,'dpz_arrr':dpz_arr,'pdedp':pdedp,
+                  'tsamp':tsamp,'spec':spec}
         
         return struct
 
-    #def check_bdry():
-    #    #threshold limit for when to adjust grid
-    #    dthresh = 0.1
-    #
-    #find boundary for mu and Pz based on energy range in pdedp calcs
-    #    pde_engn = convert_en(pde_emax) #convert to normalized energy units)
-    #    
-    #    return
+    def read_arr1d(lines,lstart,dl,arr):
+        """
+        Parameters
+        ----------
+        lines : Array of strings of floats
+            Lines to be read
+        lstart : int
+            Index at wwhich to start reading lines
+        dl : int
+            dl is maximum length of line to be read
+        arr : float array
+            Array of floats that was read
 
-    #def check_dedp():
-    #    return
+        Reads float valuess from lines to arr starting at line lstart
+        until arr is completely filled
+        """
+        ix = 0
+        lend = int(np.ceil(len(arr)/dl)) + lstart 
+        for i in range(lstart,lend):
+            if ix+dl > len(arr):
+                arr[ix:] = [float(x) for x in lines[i].split()]
+            else: #end case
+                arr[ix:ix+dl] = [float(x) for x in lines[i].split()]
+            ix = ix + dl
+        return arr, lend
 
-    def write_kick_ufile(dtsamp,e_arr,mu_arr,pz_arr=29,
-                         de_arr,dp_arr,pdedp,ami=2,zmi=1,
+    def write_pdedp_ufile(dtsamp,e_arr,mu_arr,pz_arr=29,
+                         de_arr,dpz_arr,pdedp,ami=2,zmi=1,
                          myfile='pDEDP.AEP'):
         """
         Parameters
@@ -320,7 +467,7 @@ class Orbitkicks():
             Array of pz values in Roscoe units
         de_arr : float array
             Array of DE kicks in Roscoe units
-        dp_arr : float array
+        dpz_arr : float array
             Array of DP kicks in Roscoe units
         pdedp : float array
             5D phase-space matrix
@@ -332,7 +479,8 @@ class Orbitkicks():
             Ufile containing orbit kicks to write to. Default is pDEDP.AEP
         """
         #print start
-        print('Writing kick output to '+myfile+'\n')
+        print('Writing kick output to '+myfile)
+        print('')
         
         #header information
         lshot=123456
@@ -425,7 +573,8 @@ class Orbitkicks():
 
         #line 10
         dtsamp *= 1000.0
-        f.write('  '+str(dtsamp)+'          ')
+        hh = ff.FortranRecordWriter('(1e13.6)')
+        f.write('  '+hh.write([dtsamp])+'          ')
         f.write('; TSTEPSIM  - TIME STEP USED IN SIMULATION [ms]'+'\n')
 
         #line 11
@@ -482,6 +631,7 @@ class Orbitkicks():
                         for n in range(0,len(dpz_arr)):
                             val = pdedp[i,j,k,m,n]
                             if val != 0.0:
+                                #fortran indexing at 1
                                 f.write(m+1,n+1,i+1,j+1,k+1,hh.write([val]))
 
         #print footer information
@@ -495,7 +645,8 @@ class Orbitkicks():
         f.close()
 
         #print end
-        print('Finished writing kick output to '+myfile+'\n')
+        print('Finished writing kick output to '+myfile)
+        print('')
         
         return
     
@@ -503,29 +654,16 @@ class Orbitkicks():
         """
         Parameters
         ----------
-        dtsamp : float [s]
-            Sampling time step in seconds
-        e_arr : float array
-            Array of energy values in Roscoe units
-        mu_arr : float array
-            Array of mu values in Roscoe units
-        pz_arr : float array
-            Array of pz values in Roscoe units
-        de_arr : float array
-            Array of DE kicks in Roscoe units
-        dp_arr : float array
-            Array of DP kicks in Roscoe units
         pdedp : float array
             5D phase-space matrix
-        ami : int
-            Atomic mass number of ion. Default is 2 for deuterium
-        zmi : int
-            Atmoic charge number of ion. Default is 1 for deuterium
-        myfile : string 
-            Ufile containing orbit kicks to write to. Default is pDEDP.AEP
+        de_arr : float array
+            Array of DE kicks in Roscoe units
+        dpz_arr : float array
+            Array of DP kicks in Roscoe units
         """
         #print start
-        print('Finalizing pDEDP computation'+'\n')
+        print('Finalizing pDEDP computation')
+        print('')
 
         #make sure (DE,DP)=(0,0)
         inde = np.argmin(np.abs(de_arr))
@@ -533,18 +671,21 @@ class Orbitkicks():
         de_arr[inde] = 0.0
         dpz_arr[indp] = 0.0
 
+        #get dimensions
+        n_e,n_pz,n_mu,n_de,n_dpz = pdedp.shape
+
         #get average counts/bin from non-empty bins
         #fill in empty bins with unity
         nbins = 0
         cnt_avg = 0
-        sum_p = np.zeros(len(e_arr),len(pz_arr),len(mu_arr))
-        for i in range(0,len(e_arr)):
-            for j in range(0,len(pz_arr)):
-                for k in range(0,len(mu_arr)):
+        sum_p = np.zeros([n_e,n_pz,n_mu])
+        for i in range(0,n_e):
+            for j in range(0,n_pz):
+                for k in range(0,n_mu):
                     cnt = 0
                     sum_p[i,j,k] = 0
-                    for m in range(0,len(de_arr)):
-                        for n in range(0,len(dpz_arr)):
+                    for m in range(0,n_de):
+                        for n in range(0,n_dpz):
                             cnt += pdedp[i,j,k,m,n]
 
                     if cnt > 0:
@@ -559,13 +700,14 @@ class Orbitkicks():
             cnt_avg /= nbins
                 
         #Normalize all probabilities to average number of counts/bin
-        for i in range(0,len(e_arr)):
-            for j in range(0,len(pz_arr)):
-                for k in range(0,len(mu_arr)):
+        for i in range(0,n_e):
+            for j in range(0,n_pz):
+                for k in range(0,n_mu):
                     pdedp[i,j,k,:,:] *= cnt_avg/sum_p[i,j,k]
 
         #print end
-        print('pDEDP matrices normalized'+'\n')
-        print('Average number of counts: '+str(cnt_avg)+'\n')
+        print('pDEDP matrices normalized')
+        print('Average number of counts: '+str(cnt_avg))
+        print('')
         
         return
