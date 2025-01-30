@@ -22,7 +22,8 @@ class Orbitkicks():
     def __init__(self,ascot):
         self._ascot = ascot
 
-    def simkick(self,dtsamp,nprt=10000,nloop=5,update=False,
+    def simkick(self,dtsamp,tsim=0.0002,gcmode=True,
+                nprt=10000,nloop=5,update=False,
                 e_min=1000.0,e_max=150.0e3,e_bins=15,
                 pz_min=-1.2,pz_max=1.0,pz_bins=40,
                 mu_min=0.0,mu_max=1.4,mu_bins=16,
@@ -34,6 +35,10 @@ class Orbitkicks():
         dtsamp : float [s]
             Time over which to sample orbit kicks. Should be a little bigger than
             the mode period of interest.
+        tsim : float [s]
+            Simulation run time. Default is 0.2 ms
+        gcmode : boolean
+            Option to run in guiding-center. Default is True
         nprt : int
             Number of markers per iteration. Default is 10000
         nloop : int
@@ -72,6 +77,20 @@ class Orbitkicks():
         dpz_bins : int
             Number of bins in kick momentum array. Default is 29; must be odd!
         """
+        #some checks on simulation times
+        #check for too long run
+        if tsim > 0.0005:
+            print('Warning')
+            print('Simulation run time exceeds 5 ms. Lower tsim')
+            print('Aborting')
+
+        #check for too short run
+        if tsim < 2.5*dtsamp:
+            print('Warning')
+            print('Simulation run time too short compared to dtsamp')
+            print('Aborting')
+            return
+        
         #make storage for kicks
         if update == False:
             #new run
@@ -82,8 +101,8 @@ class Orbitkicks():
             dpz_arr = np.linspace(dpz_min,dpz_max,dpz_bins)
             pdedp = np.zeros([e_bins,pz_bins,mu_bins,de_bins,dpz_bins])
             pdedp_optimize = True
-            pde_maxDE = 0.0
-            pde_maxDPz = 0.0
+            maxDE_kick = 0.0
+            maxDPz_kick = 0.0
         else:
             #build on previous Ufile
             data = read_pdedp_ufile(myfile='pDEDP.AEP')
@@ -97,8 +116,6 @@ class Orbitkicks():
             spec_old = data['spec']
             pdedp_optimize = False
 
-            pde_maxDE,pde_maxDPz = find_maxDEDP(pdedp,de_arr,dpz_arr)
-
             #check sampling time matches
             if dtsamp_old != dtsamp:
                 print('Warning')
@@ -106,15 +123,10 @@ class Orbitkicks():
                 print('Aborting')
                 return
             
-        #check some run options??
-
-        #check for too short run
-        trun = opt['ENDCOND_MAX_MILEAGE']
-        if trun < 2.5*dtsamp:
-            print('Warning')
-            print('Simulation run time too short compared to dtsamp')
-            print('Aborting')
-            return
+        #make run options
+        opt = Opt.get_default()
+        set_simkick_opts(opt,tsim=tsim,gcmode=gcmode)
+        self.simulation_initopt(**opt)
 
         #loop over sub-simulations and calculate kicks
         for iloop in range(0,nloop):
@@ -123,66 +135,92 @@ class Orbitkicks():
 
             #only optimize first loop to avoid over interpolation of kicks
             if iloop > 0:
-                pdep_optimize = False
+                pdedp_optimize = False
+
+            #initialize inputs from hdf5 file
+            self.simulation_initinputs()
         
             #initialize markers
-            #focusdep??
+            #mrk = get_markers()
+            #self.simulation_initmarkers(**mrk)
 
             #do simulation
-            subprocess.run(["where is executable"])
+            vrun = self.simulation_run()
 
-            #get marker ids, mass, and lost times
-            id_arr = self.data.active.getstate("ids") #particle IDs
-            anum_arr = self.data.active.getstate("anum") #atomic mass num
-            znum_arr = self.data.active.getstate("znum") #atomic charge num
-            t_fin = self.data.active.getstate("time",state="end") #end time [s]
+            #get marker ids, mass, charge and lost times
+            id_arr = vrun.getstate("ids",state="ini") #particle IDs
+            anum_arr = vrun.getstate("anum",state="ini") #atomic mass num
+            znum_arr = vrun.getstate("znum",state="ini") #atomic charge num
+            t_fin = vrun.getstate("time",state="end") #end time [s]
+
+            #check same species if update=True
+            if update == True:
+                if check_spec(spec_old,anum_arr[0],znum_arr[0]):
+                    pass
+                else:
+                    print('Warning')
+                    print('Reading from old pDEDP but ion species does not match')
+                    print('Aborting')
+                    return
 
             #check kick ranges based on inputs only on first loop
-            #if pdedp_optimize = True:
+            if pdedp_optimize = True:
+                pz_arr,mu_arr = check_bdry(mu_min,mu_max,mu_bins,pz_min,pz_max,pz_bins)
+
+            #need to activate B-field to access ptor and calc bcenter
+            vrun.input_init(bfield=True)
+
+            #calc B on axis
+            bout = vrun.bfield.active.read()
+            axisr = bout['axisr']
+            axisz = bout = ['axisz']
+            bcenter = vrun.input_eval(axisr,0,axisz,0,'bnorm') #[T]
+            print('Bfield on axis: '+str(bcenter)+' T')
+            print('')
+
+            #function to get all bfield info of interst???
+            #bcenter,bmin,bmax,psiwall
 
             #get CoM as function of time for every marker
             for j in range(0,len(id_arr)):
-                #need to activate B-field to access ptor
-                self.input_init(bfield=True)
-
                 #get constants of motion vs. time
-                eorb,torb,muorb,pzorb,rhoorb,wgts = self.data.active.getorbit("ekin",
-                                                                              "time",
-                                                                              "mu",
-                                                                              "ptor",
-                                                                              "rho",
-                                                                              "wgts"
-                                                                              ids=id_arr[j])
-                self.input_free()
+                eorb,torb,muorb,pzorb,wgtorb = vrun.getorbit("ekin",
+                                                             "time",
+                                                             "mu",
+                                                             "ptor",
+                                                             "wgts"
+                                                             ids=id_arr[j])
 
                 #limit calculations before marker is lost
                 tind = np.where(torb <= t_fin)[0]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
                 pzorb = pzorb[tind] #[amu*m**2/s]
-                rhoorb = rhoorb[tind] #[psipol/psipol(a)]
-                wgts = wgts[tind] #[#/s]
+                wgtorb = wgts[tind] #[#/s]
                 torb = torb[tind] #[s]
 
-                #limit to rho<1; limit_psi in ORBIT
-                rind = np.where(rhoorb < 1.0)[0]
-                eorb = eorb[rind]
-                muorb = muorb[rind]
-                pzorb = pzorb[rind]
-                wgts = wgts[rind]
-                torb = torb[tind]
-
                 #convert to Roscoe units
-                eorb = convert_en(eorb,anum=anum_arr[j],znum=znum_arr[j],bcenter=bcenter)
+                eorb = convert_en(eorb,bcenter,anum=anum_arr[j],znum=znum_arr[j])
                 muorb = convert_mu(muorb,eorb,bcenter=bcenter)
                 pzorb = convert_pz(pzorb)
 
-            #calculate and histogram kicks
-            #pdedp_record()
+            #free bfield for next loop
+            vrun.input_free()
+
+            #calculate kicks
+            #pdedp_calc_kicks()
 
             #check (DE,DPz) ranges only on first loop after kick calcs
             if pdedp_optimize = True:
-                #check_DEDP(pdedp,
+                de_arr,dpz_arr = check_DEDP(maxDE_kick,maxDPz_kick,
+                                            de_max,de_min,de_bins,
+                                            dpz_max,dpz_min,dpz_max)
+
+            #record kicks
+            #pdedp_record_kicks()
+
+            #free markers for next iteration
+            self.simulation_free(markers=True,diagnostics=False)
 
             #print end of loop
             print('Completed iteration '+str(iloop+1)+'/'+str(nloop))
@@ -199,7 +237,46 @@ class Orbitkicks():
         
         return
 
-    def convert_en(myen,anum=2.0,znum=1.0,bcenter):
+    def set_simkick_opts(opt,tsim=0.0002,gcmode=True):
+        """
+        Parameters
+        ----------
+        opt : options group
+            Default options object
+        tsim : float [s]
+            Simulation run time. Default is 0.2ms
+        gcmode : boolean
+            Option to run in guiding-center. Default is True
+        """
+        #settings dependent on GC or F0
+        if gcmode == True: #GC
+            sim_mode = 2
+            rec_mode = 1
+        else: #FO
+            sim_mode = 1
+            rec_mode = 0
+            
+        #change options from the default
+        opt.update({
+            "SIM_MODE":sim_mode,
+            "RECORD_MODE":rec_mode,
+            "ENDCOND_SIMTIMELIM":1, #end at max mileage
+            "ENDCOND_RHOLIM":1, #end at rho>=1
+            "ENDCOND_LIM_SIMTIME":10.0,
+            "ENDCOND_MAX_MILEAGE":tsim, #mileage is actual sim time
+            "ENDCOND_MAX_CPUTIME":,10.0,
+            "ENDCOND_MAX_RHO":1.0,
+            "ENABLE_ORBIT_FOLLOWING":1, #orbit following ON
+            "ENABLE_MHD":1, #include MHD
+            "ENABLE_ORBITWRITE":1, #store marker orbits
+            "ORBITWRITE_MODE":1, #collect orbits on dt intervals
+            "ORBITWRITE_NPOINT":50000, #max orbit collection points
+            "ORBITWRITE_INTERVAL":1.0e-8, #time interval to collect marker info
+        })
+            
+        return
+
+    def convert_en(myen,bcenter,anum=2.0,znum=1.0):
         """
         Parameters
         ----------
@@ -276,45 +353,133 @@ class Orbitkicks():
         
         return
 
-    def find_maxDEDP(pdedp,de_arr,dpz_arr):
+    def check_spec(specid,anum,znum):
         """
         Parameters
         ----------
-        pdedp : float array
-            5D kick matrices
-        de_arr : float array
-            Array for dE kicks
-        dpz_arr: float array
-            Array for dPz kicks
+        specid : int
+            TRANSP species ID to check
+        anum : int
+            Atomic mass number to compare to specid
+        znum : int
+            Atomic charge number to compare to specid
         """
-        #initialize variables
-        pde_maxDE = 0.0
-        pde_maxDPz = 0.0
+        #check TRANSP species ID agrees with anum and znum
+        #fast ion species
+        if ami==1 and zmi==1:
+            myspec = 5 
+        elif ami=2 and zmi=1:
+            myspec = 1 
+        elif ami=3 andd zmi=1:
+            myspec = 2 
+        elif ami=3 and zmi=2:
+            myspec = 3 
+        elif ami=4 and zmi=2:
+            myspec = 4 
+        else:
+            myspec = 0
 
-        n_e,n_pz,n_mu,n_de,n_dpz = pdedp.shape
+        if myspec == specid:
+            return True
+        else:
+            return False
 
-        for i in range(0,n_e):
-            for j in range(0,n_pz):
-                for k in range(0,n_mu):
-                    for m in range(0,n_de):
-                        for n in range(0,n_dpz):
-                            if pdedp[i,j,k,n,m] > 0:
-                                if abs(de_arr[m]) > pde_maxDE:
-                                    pde_maxDE = de_arr[m]
-                                if abs(dpz_arr[n]) > pde_maxDPz:
-                                    pde_maxDPz = dpz_arr[n]
+    def check_bdry(mu_min,mu_max,mu_bins,pz_min,pz_max,pz_bins):
+        """
+        mu_min : float [unitless]
+            Minimum mag moment to calculate kicks. 
+        mu_max : float [unitless]
+            Minimum mag moment to calculate kicks. 
+        mu_bins : int
+            Number of bins in mag moment array.
+        pz_min : float [unitless]
+            Minimum tor momentum to calculate kicks.
+        pz_max : float [unitless]
+            Minimum tor momentum to calculate kicks.
+        pz_bins : int
+            Number of bins in momentum array.
+
+        Check the range used for computing p(DE,DP|E,Pz,mu)
+        and adjust the (Pz,mu) range on-the-fly to optimize
+        the sampling
+        """
+        #print start
+        print('Checking Pz,mu ranges...')
+        print('')
+
+        #threshold limit to alter ranges
+        dthresh = 0.1
+
+        #find boundary for mu and Pz based on energy range in pDEDP calc
+
+        #max energy in Roscoe units
+        dum_emax = convert_en(e_max,bcenter,anum=anum,znum=znum)
+
+        #min and max b-field; rescale so Baxis=1.0 like ORBIT
+        bmin = 1/bcenter
+        bmax = 2/bcenter
+
+        #redefine mu range with buffer
+        dum_mumax = 1.0/bmin*(mu_bins+1.0)/mu_bins
+        dum_mumax *= 1.05
+        dum_mumin = 0.0
+
+        #redefine pz range with buffer
+        dum_pzmax = axisr/psiwall*sqrt(2.0*dum_emax)*(pz_bins+1.0)/pz_bins
+        dum_pzmax *= 1.05
+        dum_pzmin = -1.0 - rlcfs/psiwall*sqrt(2.0*dum_emax)/bmax*(pz_bins+1.0)/pz_bins
+        dum_pzmin *= 1.05
+
+        #check whether range needs to be adjusted to above
+        fracMu = (mu_max-dum_mumax)/mu_max
+        fracPz = np.amax([abs((pz_max-dum_pzmax)/pz_max),abs((pz_min-dum_pzmin)/pz_min)])
+
+        if (fracMu > dthresh or fracPz > dthresh or
+            dum_pzmin < pz_min or dum_pzmax > pz_max or
+            dum_mumax > mu_max):
+            print('New Pz,mu ranges computed:')
+            print('original Pz range: '+str(pz_min)+', '+str(pz_max))
+            print('updated Pz range: '+str(dum_pzmin)+', '+str(dum_pzmax))
+            print('original mu range: '+str(mu_min)+', '+str(mu_max))
+            print('updated mu range: '+str(dum_mumin)+', '+str(dum_mumax))
+            print('')
+
+            pz_min = dum_pzmin
+            pz_max = dum_pzmax
+            mu_max = dum_mumax
+            mu_min = dum_mumin
+        else:
+            print('Pz,mu ranges look OK')
+            print('')
+
+        #form grid and return
+        pz_arr = np.linspace(pz_min,pz_max,pz_bins)
+        my_arr = np.linspace(mu_min,mu_max,mu_bins)
         
-        return pde_maxDE,pde_maxDPz
+        return pz_arr,mu_arr
 
-    def check_DEDP(pde_maxDE,pde_maxDPz,DEmax,DPzmax):
+    def check_DEDP(maxDE_kick,maxDPz_kick,de_max,de_min,de_bins,
+                   dpz_max,dpz_min,dpz_max):
         """
         Parameters
         ----------
-        pde_maxDE : float
-        pde_maxDPz : float
-        DEmax : float
-        DPzmax : float
-        
+        maxDE_kick : float [eV]
+            Max running DE kick calculated
+        maxDPz_kick : float
+            Max running DPz kick calculated
+        de_min : float [eV]
+            Minimum change in energy. 
+        de_max : float [eV]
+            Maximum change in energy.
+        de_bins : int
+            Number of bins in kick energy array. 
+        dpz_min : float [unitless]
+            Minimum change in momentum.
+        dpz_max : float [unitless]
+            Minimum change in  momentum.
+        dpz_bins : int
+            Number of bins in kick momentum array.
+
         Check the range used for computing p(DE,DP|E,Pz,mu)
         and adjust the (DE,DPz) range on-the-fly to optimize
         the sampling
@@ -327,8 +492,8 @@ class Orbitkicks():
         dthresh = 0.1
 
         #check fractional size if DE,DPz ranges need to be updated
-        fracE = (pde_maxDE-DEmax)/DEmax
-        fracPz = (pde_maxDPz-DPzmax)/DPzmax
+        fracE = (maxDE_kick-de_max)/de_max
+        fracPz = (maxDPz_kick-dpz_max)/dpz_max
 
         if(abs(fracE)<dthresh and abs(fracPz)<dthresh and
            fracE <= 1.0 and fracPz <= 1.0):
@@ -337,40 +502,32 @@ class Orbitkicks():
             print('')
         else:
             #keep copy
-            DEmax_old = DEmax
-            DPzmax_old = DPzmax
+            de_max_old = de_max
+            dpz_max_old = dpz_max
 
             #new values
-            DEmax = (1.0+fracE)*DEmax
-            DPzmax = (1.0+fracPz)*DPzmax
+            de_max = (1.0+fracE)*de_max
+            dpz_max = (1.0+fracPz)*dpz_max
 
             #round off (doesn't need to preserve precision)
-            DEmax = 1e-6*(int(np.ceil(1e6*DEmax)))
-            DPzmax = 1e-8*(int(np.ceil(1e8*DPzmax)))
+            de_max = 1e-6*(int(np.ceil(1e6*de_max)))
+            dpz_max = 1e-8*(int(np.ceil(1e8*dpz_max)))
 
             #symmetric grid
-            DEmin = -1*DEmax
-            DPzmin = -1*DPzmax
+            de_min = -1*de_max
+            dpz_min = -1*dpz_max
 
             #print new grid info
             print('New (DE,DPz) grid computed')
-            print('original (DE,Dpz): ('+str(DEmax_old)+,+str(DPzmax_old)+')')
-            print('updated (DE,Dpz): ('+str(DEmax)+,+str(DPzmax)+')')
+            print('original (DE,Dpz): ('+str(de_max_old)+,+str(dpz_max_old)+')')
+            print('updated (DE,Dpz): ('+str(de_max)+,+str(dpz_max)+')')
             print('')
 
-            #define new grid
-            n_e,n_pz,n_mu,n_de,n_dpz = pdedp.shape
-            de_arr = np.linspace(-1*DEmax,DEmax,n_de)
-            dpz_arr = np.linspace(-1*DPzmax,DPzmax,n_dpz)
-
-            recompute = True #???
-            pdedp *= 0.0 #reset pDEDP???
-            #call pdedp_rcrd_resid; think is record values with new de_arr and dpz_arr
-
-        #print end
-        print()
+        #make grid
+        de_arr = np.linspace(de_min,de_max,de_bins)
+        dpz_arr = np.linspace(dpz_min,dpz_max,dpz_bins)
         
-        return
+        return de_arr,dpz_arr
 
     def read_pdedp_ufile(myfile='pDEDP.AEP'):
         """
@@ -726,12 +883,108 @@ class Orbitkicks():
         
         return
 
-    def pdedp_record():
-        #time value to average and reduce high freq noise
-        dtav = dtsamp/50 #[s]
-
+    def pdedp_calc_kicks(eorb,muorb,pzorb,wgtorb,torb):
         #print start
-        print('Computing p(DE,DP) matrix...')
+        print('Computing (DE,DP) kicks...')
         print('')
+
+        #skip first nskip points
+        dt = torb[1] - torb[0] #[s]
+        ntot = len(torb)
+        nskip = np.ceil(ntot/1e4)
+        nskip = max(1,nskip)
+        torb = torb[nskip:]
+        eorb = eorb[nskip:]
+        muorb = muorb[nskip:]
+        pzorb = pzorb[nskip:]
+        wgtorb = wgtorb[nskip:]
+
+        ttot = torb[-1] - torb[0] #total time [s]
+        nintv = ttot//tsamp #number of sampling intervals
+        nav = (tsamp/dt)//50 #number of bins to smooth over in interval
+        
+        #go through time array by sampling intervals
+        for i in range(0,len(torb),nintv):
+            #initialize to 0
+            Eav = 0.0
+            Pzav = 0.0
+            Muav = 0.0
+            Wgtav = 0.0
+            newE = 0.0
+            newPz = 0.0
+            newMu = 0.0
+            
+            for j in range(i,i+nintv,nav):
+                #find CoM avgs smoothed by nav
+                Eav += eorb[j]
+                Pzav += pzorb[j]
+                Muav += np.abs(muorb[j])
+                Wgtav += wgtorb[j]
+
+                #find avg deltas smoothed by nav
+                newE += eorb[j+nintv]
+                newPz += pzorb[j+nintv]
+                newMu += muorb[j+intv]
+
+            #finish computing averages
+            Eav /= nav
+            Pzav /= nav
+            Muav /= nav
+            Wgtav /= nav
+            Wgtav *= tsamp #units now [#]
+            newE /= nav
+            newPz /= nav
+            newMu /= nav
+
+            #calculate DE,DP,DM
+            #dt_fact???
+            dedum = newE - Eav
+            dpzdum = newPz - Pzav
+            dmudum = newMu - Muav
+
+            #update max kicks
+            maxDE_kick = max(1.05*dedum,maxDE_kick)
+            maxDPz_kick = max(1.05*dpzdum,maxDPz_kick)
+
+        kick_calc_str = {'eavgs':eavgs,'pzavgs':pzavgs,'muavgs':muavgs,
+                         'dekicks':dekicks,'dpzkicks':dpzkicks,'wgts':wgts}
+        
+        return kick_calc_str
+
+    def pdedp_record_kicks(pdedp,e_arr,pz_arr,mu_arr,de_arr,dpz_arr,
+                           kick_calc_str):
+        """
+        Parameters
+        ----------
+        
+        """
+        #print start
+        print(print('Recording pDEDP to 5D matrix...')
+        print('')
+        
+        #unpack kick structure
+        eavgs = kick_calc_str['eavgs']
+        pzavgs = kick_calc_str['pzavgs']
+        muavgs = kick_calc_str['muavgs']
+        dekicks = kick_calc_str['dekicks']
+        dpzkicks = kick_calc_str['dpzkicks']
+        wgts = kick_calc_str['wgts']
+
+        #histogram each kick calculation
+        for i in range(0,len(eavgs)):
+            #get (E,Pz,mu) bin indexes
+            inde = np.argmin(np.abs(e_arr-eavgs[i]))
+            indpz = np.argmin(np.abs(pz_arr-pzavgs[i]))
+            indmu = np.argmin(np.abs(mu_arr-muavgs[i]))
+
+            #get (DE,DP) bin indexes
+            indde = np.argmin(np.abs(de_arr-ekicks[i]))
+            inddpz = np.argmin(np.abs(dpz_arr-pzkicks[i]))
+
+            #update pdedp by weight
+            pdedp[inde,indpz,indmu,indde,inddpz] += wgts[i]
+
+        #print end
+        print('Finished recording pDEDP to 5D matrix')
         
         return
