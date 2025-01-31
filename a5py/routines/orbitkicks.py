@@ -11,7 +11,30 @@ import fortranformat as ff
 
 class Orbitkicks():
     """
-    Some explination will go here
+    Class for computing orbit-kicks based on the ORBIT-kick
+    code by M. Podesta (see PPCF 2014 and 2017).
+
+    The main function is simkick which performs a series of
+    ASCOT runs and calculates the "kick matrices" which
+    are 5D phase-space matrices to compute P(DE,DP|E,P,mu).
+    That is, the average change in energy and canonical
+    toroidal momentum given the location in phase=space 
+    (E.Pphi,Mu). Theses calculations are perform with 
+    nprt number of markers for nloop iterations.
+
+    All other functions withi this class are in support of 
+    this main function. 
+
+    The main output is a Ufile calle pDEDP.AEP. This is of
+    the correct form to pass directly to TRANSP to calculate
+    the enhanced anomalyous fast ion transport. Note that it
+    is species dependent. 
+
+    Inputs require a sampling time, tsamp, which should be a
+    little longer than the mode period of interest. Optional 
+    inputs include the simulation run time, number of markers,
+    number of itrerations, guiding-center mode or full-orbit, 
+    and matrix bounds and dimensions.
 
     Attributes
     ----------
@@ -80,16 +103,11 @@ class Orbitkicks():
         #some checks on simulation times
         #check for too long run
         if tsim > 0.0005:
-            print('Warning')
-            print('Simulation run time exceeds 5 ms. Lower tsim')
-            print('Aborting')
+            raise ValueError('Simulation run time exceeds 5 ms. Lower tsim')
 
         #check for too short run
         if tsim < 2.5*dtsamp:
-            print('Warning')
-            print('Simulation run time too short compared to dtsamp')
-            print('Aborting')
-            return
+            raise ValueError('Simulation run time too short compared to dtsamp')
         
         #make storage for kicks
         if update == False:
@@ -118,10 +136,10 @@ class Orbitkicks():
 
             #check sampling time matches
             if dtsamp_old != dtsamp:
-                print('Warning')
-                print('Reading from old pDEDP but sampling times do not match')
-                print('Aborting')
-                return
+                raise ValueError('Reading from old pDEDP but sampling times do not match')
+
+        #initialize inputs from hdf5 file
+        self.simulation_initinputs()
             
         #make run options
         opt = Opt.get_default()
@@ -136,9 +154,6 @@ class Orbitkicks():
             #only optimize first loop to avoid over interpolation of kicks
             if iloop > 0:
                 pdedp_optimize = False
-
-            #initialize inputs from hdf5 file
-            self.simulation_initinputs()
         
             #initialize markers
             #mrk = get_markers()
@@ -158,10 +173,7 @@ class Orbitkicks():
                 if check_spec(spec_old,anum_arr[0],znum_arr[0]):
                     pass
                 else:
-                    print('Warning')
-                    print('Reading from old pDEDP but ion species does not match')
-                    print('Aborting')
-                    return
+                    raise ValueError('Reading from old pDEDP but ion species does not match')
 
             #check kick ranges based on inputs only on first loop
             if pdedp_optimize = True:
@@ -177,7 +189,6 @@ class Orbitkicks():
             bcenter = vrun.input_eval(axisr,0,axisz,0,'bnorm') #[T]
             print('Bfield on axis: '+str(bcenter)+' T')
             print('')
-
             #function to get all bfield info of interst???
             #bcenter,bmin,bmax,psiwall
 
@@ -191,7 +202,7 @@ class Orbitkicks():
                                                              "wgts"
                                                              ids=id_arr[j])
 
-                #limit calculations before marker is lost
+                #limit calculations before marker is terminated
                 tind = np.where(torb <= t_fin)[0]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
@@ -208,7 +219,8 @@ class Orbitkicks():
             vrun.input_free()
 
             #calculate kicks
-            #pdedp_calc_kicks()
+            kick_str = pdedp_calc_kicks(dtsamp,eorb,muorb,pzorb,wgtorb,torb,
+                                        maxDE_kick,maxDPz_kick)
 
             #check (DE,DPz) ranges only on first loop after kick calcs
             if pdedp_optimize = True:
@@ -217,7 +229,8 @@ class Orbitkicks():
                                             dpz_max,dpz_min,dpz_max)
 
             #record kicks
-            #pdedp_record_kicks()
+            pdedp_record_kicks(pdedp,e_arr,pz_arr,mu_arr,de_arr,dpz_arr,
+                               kick_str)
 
             #free markers for next iteration
             self.simulation_free(markers=True,diagnostics=False)
@@ -275,6 +288,25 @@ class Orbitkicks():
         })
             
         return
+
+    def get_kick_bfield(self):
+        """
+        Parameters
+        ----------
+        
+        """
+        self.input_init(bfield=True)
+        bout = self.bfield.active.read()
+        axisr = bout['axisr']
+        axisz = bout = ['axisz']
+
+        bcenter = vrun.input_eval(axisr,0,axisz,0,'bnorm') #[T]
+    #        print('Bfield on axis: '+str(bcenter)+' T')
+    #        print('')
+        
+        bout = {}
+        
+        return bout
 
     def convert_en(myen,bcenter,anum=2.0,znum=1.0):
         """
@@ -883,7 +915,8 @@ class Orbitkicks():
         
         return
 
-    def pdedp_calc_kicks(eorb,muorb,pzorb,wgtorb,torb):
+    def pdedp_calc_kicks(dtsamp,eorb,muorb,pzorb,wgtorb,torb,
+                         maxDE_kick,maxDPz_kick):
         #print start
         print('Computing (DE,DP) kicks...')
         print('')
@@ -902,6 +935,15 @@ class Orbitkicks():
         ttot = torb[-1] - torb[0] #total time [s]
         nintv = ttot//tsamp #number of sampling intervals
         nav = (tsamp/dt)//50 #number of bins to smooth over in interval
+
+        #storage to save values to record later
+        #record later in case we need to optimize and re-bin
+        eavgs = []
+        pzavgs = []
+        muavgs = []
+        dekicks = []
+        dpzkicks = []
+        wgts = []
         
         #go through time array by sampling intervals
         for i in range(0,len(torb),nintv):
@@ -946,6 +988,18 @@ class Orbitkicks():
             maxDE_kick = max(1.05*dedum,maxDE_kick)
             maxDPz_kick = max(1.05*dpzdum,maxDPz_kick)
 
+            #save it all
+            eavgs.append(Eav)
+            pzavgs.append(Pzav)
+            muavgs.append(Muav)
+            dekicks.append(dedum)
+            dpzkicks.append(dpzdum)
+            wgts.append(Wgtav)
+
+        #print end
+        print('Finished computing (DE,DP) kicks')
+        print('')
+
         kick_calc_str = {'eavgs':eavgs,'pzavgs':pzavgs,'muavgs':muavgs,
                          'dekicks':dekicks,'dpzkicks':dpzkicks,'wgts':wgts}
         
@@ -981,10 +1035,183 @@ class Orbitkicks():
             indde = np.argmin(np.abs(de_arr-ekicks[i]))
             inddpz = np.argmin(np.abs(dpz_arr-pzkicks[i]))
 
-            #update pdedp by weight
+            #update pdedp by weight [#]
             pdedp[inde,indpz,indmu,indde,inddpz] += wgts[i]
 
         #print end
         print('Finished recording pDEDP to 5D matrix')
         
         return
+
+#R: energies be in eV, bfield be written from B_STS
+#M: nothing
+#E: Uniformly samples particles between emin and emax, within the LCFS,
+# random pitch, random gyroradius, random tor angle. Default is deuterons.
+def uni_mrk(fname,emin=1000.0,emax=1.0e5,pmin=-1.0,pmax=1.0,
+            rhomax=0.99,anum=2,znum=1,nprt=10000):
+    #constants
+    pmass = 1.6726e-27 #kg
+    q = 1.602e-19 #Coulomb
+    amu = 1.6605e-27 #kg
+
+    #marker ids
+    ids = np.array(range(1,nprt+1))
+
+    #default is deuterium
+    anum = np.ones(nprt)*anum
+    znum = np.ones(nprt)*znum
+
+    #mass has units amu and charge in units e
+    mass = np.ones(nprt)*anum*(pmass/amu)
+    charge = np.ones(nprt)*znum
+
+    #give equal weights
+    weight = np.ones(nprt)
+
+    #start time is t=0 for all
+    time = np.zeros(nprt)
+
+    #read B-field
+    h5 = a5io(fname)
+    bout = h5.data.bfield.active.read()
+    phimin = bout['axis_phimin'][0] #deg
+    phimax = bout['axis_phimax'][0] #deg
+    nphi = bout['axis_nphi'][0]
+    phiang = np.linspace(phimin,phimax,nphi,endpoint=False) #deg
+    psi = bout['psi'] #Wb
+    psi1 = bout['psi1'][0] #Wb at LCFS
+    psi_rmin = bout['psi_rmin'][0] #m
+    psi_rmax = bout['psi_rmax'][0] #m
+    psi_nr = bout['psi_nr'][0]
+    rmag = np.linspace(psi_rmin,psi_rmax,psi_nr)
+    psi_zmin = bout['psi_zmin'][0] #m
+    psi_zmax = bout['psi_zmax'][0] #m
+    psi_nz = bout['psi_nz'][0]
+    zmag = np.linspace(psi_zmin,psi_zmax,psi_nz)
+
+    #get lcfs
+    bout2 = np.load(fname[0:-3]+'_lcfs.npy',encoding="latin1",
+                    allow_pickle=True).item()
+    rlcfs = bout2['rlcfs'] #m
+    zlcfs = bout2['zlcfs'] #m
+    
+    #storage
+    r = np.zeros(nprt)
+    z = np.zeros(nprt)
+    phi = np.zeros(nprt)
+    zeta = np.zeros(nprt)
+    vr = np.zeros(nprt)
+    vz = np.zeros(nprt)
+    vphi = np.zeros(nprt)
+    pitch = np.zeros(nprt)
+    energy = np.zeros(nprt)
+
+    #uniform sampling
+    for i in range(nprt):
+        #toroidal angle (deg)
+        phi[i] = random.uniform(0.0,360.0)
+        
+        #gyroangle (rad)
+        zeta[i] = random.uniform(0.0,2.0*np.pi)
+
+        #pitch (vpar/vtot)
+        #pitch[i] = random.uniform(-1.0,1.0)
+        pitch[i] = random.uniform(pmin,pmax)
+        
+        #energy (eV); default is 1-100 keV
+        energy[i] = random.uniform(emin,emax)
+
+        #get random velocity vector
+        vtot = np.sqrt(2.0*energy[i]*q/(mass[i]*amu)) #m/s
+        vphi[i] = random.uniform(-1.0,1.0)
+        if (vphi[i] == 1) or (vphi[i] == -1):
+            vr[i] = 0
+            vz[i] = 0
+        else:
+            v2 = np.sqrt(1.0-vphi[i]**2)
+            vr[i] = random.uniform(-1.0*v2,v2)
+            if (vr[i] == v2) or (vr[i] == -1*v2):
+                vz[i] = 0
+            else:
+                vz[i] = np.sqrt(1.0-(vphi[i]**2 + vr[i]**2))
+
+        #unnormalize by vtot
+        vr[i] *= vtot #m/s
+        vz[i] *= vtot #m/s
+        vphi[i] *= vtot #m/s
+
+        #get LCFS
+        phind = np.argmin(np.abs(phiang-phi[i]))
+        myrlcfs = rlcfs[:,phind]
+        myzlcfs = zlcfs[:,phind]
+
+        #find flux surface for rhomax
+        #cs = plt.contour(rmag,zmag,np.transpose(psi[:,phind,:])/psi1,
+        #                 colors='w',alpha=0,levels=100)
+        #indlev = np.argmin(np.abs(cs.levels-rhomax))
+        #mycont = cs.allsegs[indlev][0]
+        mycont = ski.measure.find_contours(np.sqrt(psi[:,phind,:]/psi1),rhomax)
+        mycont = mycont[0]
+        fx = interp1d(np.arange(0,len(rmag)),rmag.flatten())
+        fy = interp1d(np.arange(0,len(zmag)),zmag.flatten())
+        mycont[:,0] = fx(mycont[:,0])
+        mycont[:,1] = fy(mycont[:,1])
+
+        #stay within rhomax
+        #rmin = np.amin(myrlcfs)
+        #rmax = np.amax(myrlcfs)
+        #zmin = np.amin(myzlcfs)
+        #zmax = np.amax(myrlcfs)
+        rmin = np.amin(mycont[:,0])
+        rmax = np.amax(mycont[:,0])
+        zmin = np.amin(mycont[:,1])
+        zmax = np.amax(mycont[:,1])
+
+        #get random R and find intersection of vertical line with LCFS
+        myr = random.uniform(rmin,rmax)
+        line1 = sh.LineString(np.column_stack(([myr,myr],[zmin,zmax])))
+        #line2 = sh.LineString(np.column_stack((myrlcfs,myzlcfs)))
+        line2 = sh.LineString(np.column_stack((mycont[:,0],mycont[:,1])))
+        intersection = line1.intersection(line2)
+        zinters = []
+        for segment in intersection.geoms:
+            x,y = segment.xy
+            zinters.append(y[0])
+
+        #get random Z between intersection points
+        myz = random.uniform(np.amin(zinters),np.amax(zinters))
+        r[i] = myr #m
+        z[i] = myz #m
+
+        #debugging
+        #plt.plot(myrlcfs,myzlcfs,color='k')
+        #plt.plot(mycont[:,0],mycont[:,1],color='magenta',linestyle='--')
+        #plt.plot([myr,myr],[np.amin(zinters),np.amax(zinters)],color='b')
+        #plt.scatter(r[i],z[i],color='r',marker='x')
+        #plt.show()
+        #input()
+            
+        #print status
+        if (i+1)%1000==0:
+            print('Sampled '+str(i+1)+' particles')
+    
+    #close contour plot window
+    plt.close()
+
+    mystr = {'ids':ids,
+             'mass':mass, #amu
+             'charge':charge, #e
+             'r':r, #m
+             'phi':phi, #deg
+             'z':z, #m
+             'vr':vr, #m/s
+             'vphi':vphi, #m/s
+             'vz':vz, #m/s
+             'anum':anum,
+             'znum':znum,
+             'weight':weight, #markers/s
+             'time':time, #s
+             'energy':energy, #eV
+             'pitch':pitch, #vpar/vtot
+             'zeta':zeta} #rad
+    return mystr

@@ -1,4 +1,4 @@
-name: ascot-env
+name: ascot-env-mpitest
 channels:
   - conda-forge
 dependencies:
@@ -22,6 +22,7 @@ dependencies:
   - matplotlib
   - pyvista
   - freeqdsk
+  - fortranformat
   - pip:
     - desc-opt
     - netCDF4
