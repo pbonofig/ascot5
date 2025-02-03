@@ -4,10 +4,9 @@ of motion: energy and canonical toroidal momentum. It is assumed that
 the magnetic moment is held constant (true for low freq. modes)
 """
 import numpy as np
-import unyt
 from a5py.ascot5io.options import Opt
-import subprocess
 import fortranformat as ff
+from scipy.interpolate import RectBivariateSpline
 
 class Orbitkicks():
     """
@@ -46,7 +45,7 @@ class Orbitkicks():
         self._ascot = ascot
 
     def simkick(self,dtsamp,tsim=0.0002,gcmode=True,
-                nprt=10000,nloop=5,update=False,
+                nprt=10000,nloop=5,
                 e_min=1000.0,e_max=150.0e3,e_bins=15,
                 pz_min=-1.2,pz_max=1.0,pz_bins=40,
                 mu_min=0.0,mu_max=1.4,mu_bins=16,
@@ -67,8 +66,6 @@ class Orbitkicks():
         nloop : int
             Number of iterations to perform, i.e. the total marker count will
             be nprt*nloop. Defualt is 5. 
-        update : boolean
-            If true, will read ufile in CWD and add statistics. Default is false.
         e_min : float [eV]
             Minimum energy to calculate kicks. Default 1000 eV
         e_max : float [eV]
@@ -103,42 +100,24 @@ class Orbitkicks():
         #some checks on simulation times
         #check for too long run
         if tsim > 0.0005:
-            raise ValueError('Simulation run time exceeds 5 ms. Lower tsim')
+            raise ValueError('Simulation run time exceeds 0.5 ms. Lower tsim')
 
         #check for too short run
         if tsim < 2.5*dtsamp:
             raise ValueError('Simulation run time too short compared to dtsamp')
         
         #make storage for kicks
-        if update == False:
-            #new run
-            e_arr = np.linspace(e_min,e_max,e_bins)
-            mu_arr = np.linspace(mu_min,mu_max,mu_bins)
-            pz_arr = np.linspace(pz_min,pz_max,pz_bins)
-            de_arr = np.linspace(de_min,de_max,de_bins)
-            dpz_arr = np.linspace(dpz_min,dpz_max,dpz_bins)
-            pdedp = np.zeros([e_bins,pz_bins,mu_bins,de_bins,dpz_bins])
-            pdedp_optimize = True
-            maxDE_kick = 0.0
-            maxDPz_kick = 0.0
-        else:
-            #build on previous Ufile
-            data = read_pdedp_ufile(myfile='pDEDP.AEP')
-            e_arr = data['E']
-            mu_arr = data['mu']
-            pz_arr = data['pphi']
-            de_arr = data['dE']
-            dpz_arr = data['dP']
-            pdedp = data['f']
-            dtsamp_old = data['dtsamp']
-            spec_old = data['spec']
-            pdedp_optimize = False
+        e_arr = np.linspace(e_min,e_max,e_bins)
+        mu_arr = np.linspace(mu_min,mu_max,mu_bins)
+        pz_arr = np.linspace(pz_min,pz_max,pz_bins)
+        de_arr = np.linspace(de_min,de_max,de_bins)
+        dpz_arr = np.linspace(dpz_min,dpz_max,dpz_bins)
+        pdedp = np.zeros([e_bins,pz_bins,mu_bins,de_bins,dpz_bins])
+        pdedp_optimize = True
+        maxDE_kick = 0.0
+        maxDPz_kick = 0.0
 
-            #check sampling time matches
-            if dtsamp_old != dtsamp:
-                raise ValueError('Reading from old pDEDP but sampling times do not match')
-
-        #initialize inputs from hdf5 file
+        #initialize inputs from hdf5 file for vrun
         self.simulation_initinputs()
             
         #make run options
@@ -168,54 +147,48 @@ class Orbitkicks():
             znum_arr = vrun.getstate("znum",state="ini") #atomic charge num
             t_fin = vrun.getstate("time",state="end") #end time [s]
 
-            #check same species if update=True
-            if update == True:
-                if check_spec(spec_old,anum_arr[0],znum_arr[0]):
-                    pass
-                else:
-                    raise ValueError('Reading from old pDEDP but ion species does not match')
+            #get needed bfield quantities (mainly for unit conversion) 
+            bstr = get_kick_bfield(self)
 
             #check kick ranges based on inputs only on first loop
             if pdedp_optimize = True:
-                pz_arr,mu_arr = check_bdry(mu_min,mu_max,mu_bins,pz_min,pz_max,pz_bins)
-
-            #need to activate B-field to access ptor and calc bcenter
-            vrun.input_init(bfield=True)
-
-            #calc B on axis
-            bout = vrun.bfield.active.read()
-            axisr = bout['axisr']
-            axisz = bout = ['axisz']
-            bcenter = vrun.input_eval(axisr,0,axisz,0,'bnorm') #[T]
-            print('Bfield on axis: '+str(bcenter)+' T')
-            print('')
-            #function to get all bfield info of interst???
-            #bcenter,bmin,bmax,psiwall
+                pz_arr,mu_arr = check_bdry(mu_min,mu_max,mu_bins,
+                                           pz_min,pz_max,pz_bins,
+                                           bstr)
 
             #get CoM as function of time for every marker
+            vrun.input_init(bfield=True) #needed for magnetic quantities
             for j in range(0,len(id_arr)):
-                #get constants of motion vs. time
-                eorb,torb,muorb,pzorb,wgtorb = vrun.getorbit("ekin",
-                                                             "time",
-                                                             "mu",
-                                                             "ptor",
-                                                             "wgts"
-                                                             ids=id_arr[j])
+                #get orbit info vs. time
+                torb,eorb,muorb,wgtorb,pitorb,psiorb,bphiorb,borb = vrun.getorbit("time",
+                                                                                  "ekin",
+                                                                                  "mu",
+                                                                                  "weight",
+                                                                                  "pitch",
+                                                                                  "psi",
+                                                                                  "bphi",
+                                                                                  "bnorm",
+                                                                                  ids=id_arr[j])
 
                 #limit calculations before marker is terminated
                 tind = np.where(torb <= t_fin)[0]
+                torb = torb[tind] #[s]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
-                pzorb = pzorb[tind] #[amu*m**2/s]
-                wgtorb = wgts[tind] #[#/s]
-                torb = torb[tind] #[s]
+                wgtorb = wgtorb[tind] #[#/s]
+                pitorb = pitorb[tind] #[vpar/v]
+                psiorb = psiorb[tind] #[Wb]
+                bphiorb = bphiorb[tind] #[T]
+                borb = borb[tind] #[T]
+
+                #average full-orbit over gyroperiod?? Can't record GC and GO positions simultaneously
 
                 #convert to Roscoe units
-                eorb = convert_en(eorb,bcenter,anum=anum_arr[j],znum=znum_arr[j])
-                muorb = convert_mu(muorb,eorb,bcenter=bcenter)
-                pzorb = convert_pz(pzorb)
+                eorb_p = convert_en(eorb,bstr,anum=anum_arr[j],znum=znum_arr[j])
+                muorb_p = convert_mu(muorb,eorb_p,bstr)
+                pzorb_p = calc_pz(bstr,eorb_p,pitorb,borb,bphiorb,psiorb)
 
-            #free bfield for next loop
+            #free postproc bfield for next loop
             vrun.input_free()
 
             #calculate kicks
@@ -293,22 +266,67 @@ class Orbitkicks():
         """
         Parameters
         ----------
-        
+        self : Class
+            Ascot object used to run Orbitkicks
         """
+        #unpack initialized Bfield
         self.input_init(bfield=True)
         bout = self.bfield.active.read()
-        axisr = bout['axisr']
-        axisz = bout = ['axisz']
+        raxis = bout['axisr']
+        zaxis = bout['axisz']
+        br = bout['br']
+        bz = bout['bz']
+        bphi = bout['bphi']
+        btot = np.sqrt(br**2+bz**2+bphi**2)
+        rmin = bout['rmin']
+        rmax = bout['rmax']
+        nr = bout['nr']
+        zmin = bout['zmin']
+        zmax = bout['zmax']
+        nz = bout['nz']
+        psiwall = bout['psi1']
+        psi = bout['psi']
+        self.input_free()
 
-        bcenter = vrun.input_eval(axisr,0,axisz,0,'bnorm') #[T]
-    #        print('Bfield on axis: '+str(bcenter)+' T')
-    #        print('')
-        
-        bout = {}
-        
-        return bout
+        #1D R and Z arrays
+        rarr = np.linspace(rmin,rmax,nr) #[m]
+        zarr = np.linspace(zmin,zmax,nz) #[m]
 
-    def convert_en(myen,bcenter,anum=2.0,znum=1.0):
+        #interpolate to finer grid
+        ftot = RectBivariateSpline(rarr,zarr,btot) #[T]
+        fphi = RectBivariateSpline(rarr,zarr,bphi) #[T]
+        fpsi = RectBivariateSpline(rarr,zarr,psi) #[Wb]
+        newr = np.linspace(rmin,rmax,nr*5) #[m]
+        newz = np.linspace(zmin,zmax,nz*5) #[m]
+        btot = ftot.ev(newr,newz)
+        bphi = fphi.ev(newr,newz)
+        psi = fpsi.ev(newr,newz)
+
+        #bcenter
+        bcenter = ftot.ev(raxis,zaxis) #[T]
+
+        #min and max Btot within LCFS
+        indp = np.where(psi <= psiwall)[0]
+        bsub = btot[indp]
+        bmin = np.amin(bsub)
+        bmax = np.amax(bsub)
+
+        #find R(lcfs,theta=0) and psiouter
+        indr = np.argmin(np.abs(newr-raxis))
+        indz = np.argmin(np.abs(newz-zaxis))
+        subpsi = psi[:,indz] #psi at Z=zaxis
+        indpsi = np.argmin(np.abs(subpsi-psiwall)) #R index close to psiwall
+        rlcfs = newr[indpsi]
+        router = newr[indr:]
+        psiouter = subpsi[indr:]
+        
+        bstr = {'bcenter':bcenter,'bmin':bmin,'bmax':bmax,
+                'raxis':raxis,'zaxis':zaxis,'rlcfs':rlcfs,
+                'router':router,'psiouter':psiouter}
+        
+        return bstr
+
+    def convert_en(myen,bstr,anum=2.0,znum=1.0):
         """
         Parameters
         ----------
@@ -318,8 +336,8 @@ class Orbitkicks():
             Atomic mass number of ion
         znum : int
             Atmoic charge of ion
-        bcenter : float [T]
-            Magnetic field on axis
+        bstr : struct
+            Output structure from get_kick_bfield()
 
         Eprime = ke*E, where E is in keV and
         ke = 1000*A*(mp/qe)*g_0**2/(R_0*Z_p*B_0)**2
@@ -335,12 +353,12 @@ class Orbitkicks():
         mp = 1.673e-27 #[kg]
         myen *= 1000.0 #[keV]
 
-        ke = 1000.0*anum*(mp/qe)*(1.0/(znum*bcenter)**2)
+        ke = 1000.0*anum*(mp/qe)*(1.0/(znum*bstr['bcenter'])**2)
         myen *= myen
         
         return myen
 
-    def convert_mu(mymu,myen,bcenter):
+    def convert_mu(mymu,myen,bstr):
         """
         Parameters
         ----------
@@ -348,23 +366,23 @@ class Orbitkicks():
             Magnetic moment to convert to Roscoe units.
         myen : float 
             Energy already converted to Roscoe units.
-        bcenter : float [T]
-            Magnetic field on axis
+        bstr : struct
+            Output structure from get_kick_bfield()
 
         muprime = mu*B_0_E, where E is in Roscoe units (ke*E)
         ke = 1000*A*(mp/qe)*g_0**2/(R_0*Z_p*B_0)**2
         B_0 = mag field on axis [T]
         """
-        mymu *= bcenter/myen
+        mymu *= bstr['bcenter']/myen
         
         return mymu
 
-    def convert_pz(mypz,myen):
+    def calc_pz(bstr,myen,mypit,myb,mybphi,mypsi):
         """
         Parameters
         ----------
-        mypz : float 
-            Canonical tor momentum to convert to Roscoe units.
+        bstr : struct
+            Output structure from get_kick_bfield()
         myen : float 
             Energy already converted to Roscoe units.
 
@@ -382,8 +400,23 @@ class Orbitkicks():
         Eprime = Energy already converted to Roscoe units.
         B(psi) = magnetic field [T]
         """
+        router = bstr['router']
+        psiouter = bstr['psiouter']
+        bcenter = bstr['bcenter']
+        psiwall = bstr['psiwall']
+
+        #calculate g-function
+        g = np.zeros(len(mypsi))
+        for i in range(0,len(mypsi)):
+            indpsi = np.argmin(np.abs(psiouter-mypsi[i]))
+            g[i] = mybphi[i]/bcenter*router[indpsi]
+
+        #calculate rho_parallel
+        rho = mypit*np.sqrt(2.0*myen)*bcenter/myb
+
+        pphi = rho*g/psiwall + mypsi
         
-        return
+        return pphi
 
     def check_spec(specid,anum,znum):
         """
@@ -416,7 +449,8 @@ class Orbitkicks():
         else:
             return False
 
-    def check_bdry(mu_min,mu_max,mu_bins,pz_min,pz_max,pz_bins):
+    def check_bdry(mu_min,mu_max,mu_bins,pz_min,pz_max,pz_bins,
+                   bstr):
         """
         mu_min : float [unitless]
             Minimum mag moment to calculate kicks. 
@@ -430,6 +464,8 @@ class Orbitkicks():
             Minimum tor momentum to calculate kicks.
         pz_bins : int
             Number of bins in momentum array.
+        bstr : struct
+            Output structure from get_kick_bfield()
 
         Check the range used for computing p(DE,DP|E,Pz,mu)
         and adjust the (Pz,mu) range on-the-fly to optimize
@@ -445,11 +481,14 @@ class Orbitkicks():
         #find boundary for mu and Pz based on energy range in pDEDP calc
 
         #max energy in Roscoe units
-        dum_emax = convert_en(e_max,bcenter,anum=anum,znum=znum)
+        dum_emax = convert_en(e_max,bstr,anum=anum,znum=znum)
 
         #min and max b-field; rescale so Baxis=1.0 like ORBIT
-        bmin = 1/bcenter
-        bmax = 2/bcenter
+        bmin = bstr['bmin']
+        bmax = bstr['bmax']
+        psiwall = bstr['psiwall']
+        raxis = bstr['raxis']
+        rlcfs = bstr['rlcfs']
 
         #redefine mu range with buffer
         dum_mumax = 1.0/bmin*(mu_bins+1.0)/mu_bins
@@ -457,7 +496,7 @@ class Orbitkicks():
         dum_mumin = 0.0
 
         #redefine pz range with buffer
-        dum_pzmax = axisr/psiwall*sqrt(2.0*dum_emax)*(pz_bins+1.0)/pz_bins
+        dum_pzmax = raxis/psiwall*sqrt(2.0*dum_emax)*(pz_bins+1.0)/pz_bins
         dum_pzmax *= 1.05
         dum_pzmin = -1.0 - rlcfs/psiwall*sqrt(2.0*dum_emax)/bmax*(pz_bins+1.0)/pz_bins
         dum_pzmin *= 1.05
@@ -917,6 +956,10 @@ class Orbitkicks():
 
     def pdedp_calc_kicks(dtsamp,eorb,muorb,pzorb,wgtorb,torb,
                          maxDE_kick,maxDPz_kick):
+        """
+        Parameters
+        ----------
+        """
         #print start
         print('Computing (DE,DP) kicks...')
         print('')
@@ -1010,7 +1053,18 @@ class Orbitkicks():
         """
         Parameters
         ----------
-        
+        pdedp : float array
+            5D kick matrices
+        e_arr : float array [eV]
+            Energy array values
+        pz_arr : float array
+            Canonical momentum array values
+        de_arr : float array [eV]
+            Kick energy array values
+        dpz_arr : float array
+            Kick momentum array values
+        kick_calc_str : structure
+            Structure from pdedp_calc_kicks() with calculated kick values
         """
         #print start
         print(print('Recording pDEDP to 5D matrix...')
