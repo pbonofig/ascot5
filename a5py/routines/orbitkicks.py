@@ -3,10 +3,12 @@ fusion devices. This is done by examining changes in the constants
 of motion: energy and canonical toroidal momentum. It is assumed that
 the magnetic moment is held constant (true for low freq. modes)
 """
+import unyt
 import numpy as np
 from a5py.ascot5io.options import Opt
 import fortranformat as ff
 from scipy.interpolate import RectBivariateSpline
+import matplotlib.pyplot as plt
 
 class Orbitkicks():
     """
@@ -44,8 +46,8 @@ class Orbitkicks():
     def __init__(self,ascot):
         self._ascot = ascot
 
-    def simkick(self,dtsamp,tsim=0.0002,gcmode=True,
-                nprt=10000,nloop=5,
+    def simkick(self,dtsamp,dtav=2e-6,tsim=0.0002,
+                gcmode=True,nprt=10000,nloop=5,
                 e_min=1000.0,e_max=150.0e3,e_bins=15,
                 pz_min=-1.2,pz_max=1.0,pz_bins=40,
                 mu_min=0.0,mu_max=1.4,mu_bins=16,
@@ -103,8 +105,12 @@ class Orbitkicks():
             raise ValueError('Simulation run time exceeds 0.5 ms. Lower tsim')
     
         #check for too short run
-        if tsim < (2.5*dtsamp):
+        if tsim < (3.0*dtsamp):
             raise ValueError('Simulation run time too short compared to dtsamp')
+
+        #check for too short smoothing time
+        if dtav > 0.3*dtsamp:
+            raise ValueError('Smoothing time too long compared to dtsamp')
         
         #make storage for kicks
         e_arr = np.linspace(e_min,e_max,e_bins)
@@ -128,7 +134,7 @@ class Orbitkicks():
         #loop over sub-simulations and calculate kicks
         for iloop in range(0,nloop):
             #print beginning of loop
-            print('Starting iteration '+str(iloop+1))
+            print('Starting iteration '+str(iloop+1)+'\n')
 
             #only optimize first loop to avoid over interpolation of kicks
             if iloop > 0:
@@ -136,11 +142,13 @@ class Orbitkicks():
         
             #initialize markers
             mrk = self.uni_mrk(emin=e_min,emax=e_max,pmin=-1.0,pmax=1.0,
-                               rhomax=0.99,anum=2,znum=1,nprt=10000)
+                               rhomax=0.99,anum=2,znum=1,nprt=nprt)
             self._ascot.simulation_initmarkers(**mrk)
 
             #do simulation
+            print('Sub-simulation start...'+'\n')
             vrun = self._ascot.simulation_run()
+            print('Sub-simulation end'+'\n')
             
             #get marker ids, mass, charge and lost times
             id_arr = vrun.getstate("ids",state="ini") #particle IDs
@@ -153,13 +161,18 @@ class Orbitkicks():
 
             #check kick ranges based on inputs only on first loop
             if pdedp_optimize == True:
-                pz_arr,mu_arr = self.check_bdry(mu_min,mu_max,mu_bins,
-                                                pz_min,pz_max,pz_bins,
-                                                bstr)
+                pz_arr,mu_arr = self.check_bdry(e_max,anum_arr[0],znum_arr[0],
+                                                mu_min,mu_max,mu_bins,
+                                                pz_min,pz_max,pz_bins,bstr)
 
             #get CoM as function of time for every marker
-            vrun.input_init(bfield=True) #needed for magnetic quantities
-            all_kicks = []
+            self._ascot.input_init(bfield=True) #needed for magnetic quantities
+
+            #print start
+            print('Computing (DE,DP) kicks...')
+            print('')
+            
+            all_kicks = [] #kick storage for potenttal rebin
             for j in range(0,len(id_arr)):
                 #get orbit info vs. time
                 torb,eorb,muorb,wgtorb,pitorb,psiorb,bphiorb,borb = vrun.getorbit("time",
@@ -171,9 +184,9 @@ class Orbitkicks():
                                                                                   "bphi",
                                                                                   "bnorm",
                                                                                   ids=id_arr[j])
-
+                print('hi')
                 #limit calculations before marker is terminated
-                tind = np.where(torb <= t_fin)[0]
+                tind = np.where(torb < t_fin[j])[0]
                 torb = torb[tind] #[s]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
@@ -185,10 +198,13 @@ class Orbitkicks():
 
                 #convert to Roscoe units
                 eorb_p = self.convert_en(eorb,bstr,anum=anum_arr[j],znum=znum_arr[j])
-                muorb_p = self.convert_mu(muorb,eorb_p,bstr)
+                muorb_p = self.calc_mu(muorb,eorb_p,bstr,pitorb,borb)
                 pzorb_p = self.calc_pz(bstr,eorb_p,pitorb,borb,bphiorb,psiorb)
 
-                #average full-orbit over gyroperiod; can't record GC and GO positions simultaneously
+                print(j,eorb_p,muorb_p,pzorb_p)
+                #average full-orbit over gyroperiod
+                #can't record GC and GO positions simultaneously
+                
                 if gcmode == False:
                     gc_str = find_gc_equiv(torb,eorb_p,pzorb_p,muorb_p,
                                            borb,anum_arr[j],znum_arr[j])
@@ -196,14 +212,15 @@ class Orbitkicks():
                     gc_str = {'eorb_gc':eorb_p,'pzorb_gc':pzorb_p,'muorb_gc':muorb_p}
 
                 #calculate kicks
-                kick_str = pdedp_calc_kicks(dtsamp,eorb,muorb,pzorb,wgtorb,torb,
-                                            maxDE_kick,maxDPz_kick)
+                kick_str = self.pdedp_calc_kicks(dtsamp,dtav,wgtorb,torb,
+                                                 eorb,muorb_p,pzorb_p,
+                                                 maxDE_kick,maxDPz_kick)
                 all_kicks.append(kick_str)
 
-            #loops through markers have ended
+            #loop through markers has ended
             
             #free postproc bfield for next iteration loop
-            vrun.input_free()
+            self._ascot.input_free()
 
             #check (DE,DPz) ranges only on first loop after kick calcs
             if pdedp_optimize == True:
@@ -255,6 +272,7 @@ class Orbitkicks():
         #change options from the default
         opt.update({
             "SIM_MODE":sim_mode,
+            "ENABLE_ADAPTIVE":0,
             "RECORD_MODE":rec_mode,
             "ENDCOND_SIMTIMELIM":1, #end at max mileage
             "ENDCOND_RHOLIM":1, #end at rho>=1
@@ -282,22 +300,22 @@ class Orbitkicks():
         #unpack initialized Bfield
         self._ascot.input_init(bfield=True)
         bout = self._ascot.data.bfield.active.read()
-        raxis = bout['axisr']
-        zaxis = bout['axisz']
+        raxis = bout['axisr'][0]
+        zaxis = bout['axisz'][0]
         br = bout['br']
         bz = bout['bz']
         bphi = bout['bphi']
         btot = np.sqrt(br**2+bz**2+bphi**2)
-        rmin = bout['rmin']
-        rmax = bout['rmax']
-        nr = bout['nr']
-        zmin = bout['zmin']
-        zmax = bout['zmax']
-        nz = bout['nz']
-        psiwall = bout['psi1']
+        rmin = bout['rmin'][0]
+        rmax = bout['rmax'][0]
+        nr = bout['nr'][0]
+        zmin = bout['zmin'][0]
+        zmax = bout['zmax'][0]
+        nz = bout['nz'][0]
+        psiwall = bout['psi1'][0]
         psi = bout['psi']
         self._ascot.input_free()
-
+        
         #1D R and Z arrays
         rarr = np.linspace(rmin,rmax,nr) #[m]
         zarr = np.linspace(zmin,zmax,nz) #[m]
@@ -308,9 +326,10 @@ class Orbitkicks():
         fpsi = RectBivariateSpline(rarr,zarr,psi) #[Wb]
         newr = np.linspace(rmin,rmax,nr*5) #[m]
         newz = np.linspace(zmin,zmax,nz*5) #[m]
-        btot = ftot.ev(newr,newz)
-        bphi = fphi.ev(newr,newz)
-        psi = fpsi.ev(newr,newz)
+        meshR, meshZ = np.meshgrid(newr,newz)
+        btot = ftot.ev(meshR,meshZ)
+        bphi = fphi.ev(meshR,meshZ)
+        psi = fpsi.ev(meshR,meshZ)
 
         #bcenter
         bcenter = ftot.ev(raxis,zaxis) #[T]
@@ -332,7 +351,7 @@ class Orbitkicks():
         
         bstr = {'bcenter':bcenter,'bmin':bmin,'bmax':bmax,
                 'raxis':raxis,'zaxis':zaxis,'rlcfs':rlcfs,
-                'router':router,'psiouter':psiouter}
+                'router':router,'psiouter':psiouter,'psiwall':psiwall}
         
         return bstr
 
@@ -387,14 +406,14 @@ class Orbitkicks():
         """
         qe = 1.602e-19 #[C]
         mp = 1.673e-27 #[kg]
-        myen *= 1000.0 #[keV]
-
-        ke = 1000.0*anum*(mp/qe)*(1.0/(znum*bstr['bcenter'])**2)
-        myen *= myen
+        myen /= 1000.0 #[keV]
         
+        ke = 1000.0*anum*(mp/qe)*(1.0/(znum*bstr['bcenter'])**2)
+        myen *= ke
+    
         return myen
 
-    def convert_mu(self,mymu,myen,bstr):
+    def calc_mu(self,mymu,myen,bstr,mypit,myb):
         """
         Parameters
         ----------
@@ -409,7 +428,8 @@ class Orbitkicks():
         ke = 1000*A*(mp/qe)*g_0**2/(R_0*Z_p*B_0)**2
         B_0 = mag field on axis [T]
         """
-        mymu *= bstr['bcenter']/myen
+        mymu = bstr['bcenter']/myb*(1-mypit**2)*myen/myen
+        #mymu *= bstr['bcenter']/myen
         
         return mymu
 
@@ -444,18 +464,19 @@ class Orbitkicks():
         #calculate g-function
         g = np.zeros(len(mypsi))
         for i in range(0,len(mypsi)):
-            indpsi = np.argmin(np.abs(psiouter-mypsi[i]))
+            indpsi = np.argmin(np.abs(psiouter*unyt.Wb-mypsi[i]))
             g[i] = mybphi[i]/bcenter*router[indpsi]
 
         #calculate rho_parallel
         rho = mypit*np.sqrt(2.0*myen)*bcenter/myb
 
-        pphi = rho*g/psiwall + mypsi
+        pphi = (rho*g/psiwall)*unyt.Wb*unyt.T/np.sqrt(1.0*unyt.eV) - mypsi
         
         return pphi
 
-    def check_bdry(self,mu_min,mu_max,mu_bins,pz_min,pz_max,pz_bins,
-                   bstr):
+    def check_bdry(self,e_max,anum,znum,
+                   mu_min,mu_max,mu_bins,
+                   pz_min,pz_max,pz_bins,bstr):
         """
         mu_min : float [unitless]
             Minimum mag moment to calculate kicks. 
@@ -484,13 +505,14 @@ class Orbitkicks():
         dthresh = 0.1
 
         #find boundary for mu and Pz based on energy range in pDEDP calc
-
+        
         #max energy in Roscoe units
-        dum_emax = convert_en(e_max,bstr,anum=anum,znum=znum)
+        dum_emax = self.convert_en(e_max,bstr,anum=anum,znum=znum)
 
         #min and max b-field; rescale so Baxis=1.0 like ORBIT
-        bmin = bstr['bmin']
-        bmax = bstr['bmax']
+        bcenter = bstr['bcenter']
+        bmin = bstr['bmin']/bcenter
+        bmax = bstr['bmax']/bcenter
         psiwall = bstr['psiwall']
         raxis = bstr['raxis']
         rlcfs = bstr['rlcfs']
@@ -501,9 +523,9 @@ class Orbitkicks():
         dum_mumin = 0.0
 
         #redefine pz range with buffer
-        dum_pzmax = raxis/psiwall*sqrt(2.0*dum_emax)*(pz_bins+1.0)/pz_bins
+        dum_pzmax = raxis/psiwall*np.sqrt(2.0*dum_emax)*(pz_bins+1.0)/pz_bins
         dum_pzmax *= 1.05
-        dum_pzmin = -1.0 - rlcfs/psiwall*sqrt(2.0*dum_emax)/bmax*(pz_bins+1.0)/pz_bins
+        dum_pzmin = -1.0 - rlcfs/psiwall*np.sqrt(2.0*dum_emax)/bmax*(pz_bins+1.0)/pz_bins
         dum_pzmin *= 1.05
 
         #check whether range needs to be adjusted to above
@@ -530,7 +552,7 @@ class Orbitkicks():
 
         #form grid and return
         pz_arr = np.linspace(pz_min,pz_max,pz_bins)
-        my_arr = np.linspace(mu_min,mu_max,mu_bins)
+        mu_arr = np.linspace(mu_min,mu_max,mu_bins)
         
         return pz_arr,mu_arr
 
@@ -726,8 +748,7 @@ class Orbitkicks():
             Ufile containing orbit kicks to write to. Default is pDEDP.AEP
         """
         #print start
-        print('Writing kick output to '+myfile)
-        print('')
+        print('Writing kick output to '+myfile+'\n')
         
         #header information
         lshot=123456
@@ -751,7 +772,7 @@ class Orbitkicks():
 
         #footer information
         com=';----END-OF-DATA-----------------COMMENTS:-----------'
-        com2='UFILE WRITTEN BY ASCOT, see WRITE_KICK_UFILE'
+        com2='UFILE WRITTEN BY ASCOT, see WRITE_PDEDP_UFILE'
         com3='SMOOTHING FACTORS, DELAY FACTORS:'
         com4='       NONE'
         com5='USER COMMENTS:'
@@ -819,7 +840,7 @@ class Orbitkicks():
         f.write(' '+labelw+unitsw+';-INDEPENDENT VARIABLE LABEL: W-'+'\n')
 
         #line 10
-        dtsamp *= 1000.0
+        dtsamp *= 1000.0 #[ms]
         hh = ff.FortranRecordWriter('(1e13.6)')
         f.write('  '+hh.write([dtsamp])+'          ')
         f.write('; TSTEPSIM  - TIME STEP USED IN SIMULATION [ms]'+'\n')
@@ -959,33 +980,48 @@ class Orbitkicks():
         
         return
 
-    def pdedp_calc_kicks(self,dtsamp,eorb,muorb,pzorb,wgtorb,torb,
+    def pdedp_calc_kicks(self,dtsamp,dtav,
+                         wgtorb,torb,
+                         eorb,muorb,pzorb,
                          maxDE_kick,maxDPz_kick):
         """
         Parameters
         ----------
         """
-        #print start
-        print('Computing (DE,DP) kicks...')
-        print('')
+        #skip initial time points for stability
+        tstart = 0.2*dtsamp
 
-        #skip first tsamp for numerical instabilities
-        dt = torb[1] - torb[0] #[s]
-        ntot = len(torb)
-        nskip = np.ceil(ntot/1e4)
-        nskip = max(1,nskip)
-        torb = torb[nskip:]
-        eorb = eorb[nskip:]
-        muorb = muorb[nskip:]
-        pzorb = pzorb[nskip:]
-        wgtorb = wgtorb[nskip:]
+        #return 0 if orbit did not survive this long
+        if torb[-1] < tstart:
+            kick_calc_str = {'eavgs':[0],'pzavgs':[0],'muavgs':[0],
+                             'dekicks':[0],'dpzkicks':[0],'wgts':[0]}
+            return kick_calc_str
 
+        #shift start position
+        indstart = np.argmin(np.abs(torb-tstart*unyt.s))
+        torb = torb[indstart:]
+        eorb = eorb[indstart:]
+        muorb = muorb[indstart:]
+        pzorb = pzorb[indstart:]
+        wgtorb = wgtorb[indstart:]
+
+        #relevant array sizes
         ttot = torb[-1] - torb[0] #total time [s]
-        nintv = ttot//tsamp #number of sampling intervals
-        nav = (tsamp/dt)//50 #number of bins to smooth over in interval
+        dt = torb[1] - torb[0] #time step [s]
+        print(torb-np.roll(torb,1))
+        nsamples = int(ttot/dtsamp) #number of sampling intervals
+        nintv = int(dtsamp/dt) #number of bins within sampling interval
+        nav = int(dtav/dt) #number of bins to smooth over in sampling interval to reduce noise
+        print('hey',dt,nsamples,nintv,nav)
+        #return 0 if we don't have at least 1 averaging window
+        if nsamples < 1:
+            kick_calc_str = {'eavgs':[0],'pzavgs':[0],'muavgs':[0],
+                             'dekicks':[0],'dpzkicks':[0],'wgts':[0]}
+            return kick_calc_str
 
-        #storage to save values to record later
-        #record later in case we need to optimize and re-bin
+
+        #storage to save values to record later in pdedp
+        #we record later in case we need to optimize and re-bin
         eavgs = []
         pzavgs = []
         muavgs = []
@@ -994,7 +1030,7 @@ class Orbitkicks():
         wgts = []
         
         #go through time array by sampling intervals
-        for i in range(0,len(torb),nintv):
+        for i in range(0,len(torb)-ntinv,nintv):
             #initialize to 0
             Eav = 0.0
             Pzav = 0.0
@@ -1004,24 +1040,25 @@ class Orbitkicks():
             newPz = 0.0
             newMu = 0.0
             
-            for j in range(i,i+nintv,nav):
-                #find CoM avgs smoothed by nav
+            for j in range(i,i+nav):
+                print(len(eorb),i,j)
+                #find CoM avgs smoothed by nav for (E,mu,Pz) - beg time point
                 Eav += eorb[j]
                 Pzav += pzorb[j]
                 Muav += np.abs(muorb[j])
                 Wgtav += wgtorb[j]
 
-                #find avg deltas smoothed by nav
+                #find avg deltas smoothed by nav for (DE,DP) - end time point
                 newE += eorb[j+nintv]
                 newPz += pzorb[j+nintv]
-                newMu += muorb[j+intv]
+                newMu += muorb[j+nintv]
 
             #finish computing averages
             Eav /= nav
             Pzav /= nav
             Muav /= nav
             Wgtav /= nav
-            Wgtav *= tsamp #units now [#]
+            Wgtav *= dtsamp #units now [#]
             newE /= nav
             newPz /= nav
             newMu /= nav
@@ -1107,6 +1144,9 @@ class Orbitkicks():
     
     def uni_mrk(self,emin=1000.0,emax=1.0e5,pmin=-1.0,pmax=1.0,
                 rhomax=0.99,anum=2,znum=1,nprt=10000):
+        #print start
+        print('Initializing uniform markers...'+'\n')
+        
         #constants
         pmass = 1.6726e-27 #kg
         q = 1.602e-19 #Coulomb
@@ -1174,10 +1214,10 @@ class Orbitkicks():
             vphi[i] *= vtot #m/s
 
             #get random R and Z
-            rmin = 5.0
-            rmax = 7.0
-            zmin = -1.0
-            zmax = 1.0
+            rmin = 1.0
+            rmax = 2.0
+            zmin = -1
+            zmax = 1
             r[i] = np.random.uniform(rmin,rmax) #m
             z[i] = np.random.uniform(zmin,zmax) #m
             
@@ -1187,21 +1227,24 @@ class Orbitkicks():
             
         mystr = {
             'n':nprt,
-            'r':r, #m
-            'phi':phi, #deg
-            'z':z, #m
-            'energy':energy, #eV
+            'ids':ids,
+            'r':r*unyt.m, #m
+            'phi':phi*unyt.degree, #deg
+            'z':z*unyt.m, #m
             'pitch':pitch, #vpar/vtot
-            'zeta':zeta, #rad
-            'mass':mass, #amu
-            'charge':charge, #e
-            'anum':anum,
-            'znum':znum,
-            'vr':vr, #m/s
-            'vphi':vphi, #m/s
-            'vz':vz, #m/s
             'weight':weight, #markers/s
-            'time':time, #s
-            'ids':ids}
+            'time':time*unyt.s, #s
+            'energy':energy*unyt.eV, #eV
+            'zeta':zeta*unyt.rad, #rad
+            'mass':mass*unyt.amu, #amu
+            'charge':charge*unyt.e, #e
+            'anum':anum,
+            'znum':znum}
+            #'vr':vr, #m/s
+            #'vphi':vphi, #m/s
+            #'vz':vz} #m/s
+
+        #print end
+        print('Marker initialization completed'+'\n')
     
         return mystr
