@@ -928,7 +928,7 @@ class Orbitkicks():
         
         return
 
-    def write_amode_aep(shot,tAmode,Amode,file_id,dev='D3D'):
+    def write_amode_ufile(shot,tAmode,Amode,file_id,dev='D3D'):
         """
         Parameters
         ----------
