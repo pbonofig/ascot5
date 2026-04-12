@@ -6,7 +6,6 @@ the magnetic moment is held constant (true for low freq. modes)
 import unyt
 import numpy as np
 from a5py.ascot5io.options import Opt
-import fortranformat as ff
 from scipy.interpolate import RectBivariateSpline
 import matplotlib.pyplot as plt
 
@@ -19,8 +18,8 @@ class Orbitkicks():
     ASCOT runs and calculates the "kick matrices" which
     are 5D phase-space matrices to compute P(DE,DP|E,P,mu).
     That is, the average change in energy and canonical
-    toroidal momentum given the location in phase=space 
-    (E.Pphi,Mu). Theses calculations are perform with 
+    toroidal momentum given the location in phase-space 
+    (E,Pphi,Mu). Theses calculations are performed with 
     nprt number of markers for nloop iterations.
 
     All other functions with this class are in support of 
@@ -172,7 +171,7 @@ class Orbitkicks():
             print('Computing (DE,DP) kicks...')
             print('')
             
-            all_kicks = [] #kick storage for potenttal rebin
+            all_kicks = [] #kick storage for potential rebin
             for j in range(0,len(id_arr)):
                 #get orbit info vs. time
                 torb,eorb,muorb,wgtorb,pitorb,psiorb,bphiorb,borb = vrun.getorbit("time",
@@ -745,7 +744,7 @@ class Orbitkicks():
         zmi : int
             Atmoic charge number of ion. Default is 1 for deuterium
         myfile : string 
-            Ufile containing orbit kicks to write to. Default is pDEDP.AEP
+            Ufile name containing orbit kicks to write to. Default is pDEDP.AEP
         """
         #print start
         print('Writing kick output to '+myfile+'\n')
@@ -841,8 +840,8 @@ class Orbitkicks():
 
         #line 10
         dtsamp *= 1000.0 #[ms]
-        hh = ff.FortranRecordWriter('(1e13.6)')
-        f.write('  '+hh.write([dtsamp])+'          ')
+        #hh = ff.FortranRecordWriter('(1e13.6)')
+        f.write('  '+f'{dtsamp:13.6e}'+'          ')
         f.write('; TSTEPSIM  - TIME STEP USED IN SIMULATION [ms]'+'\n')
 
         #line 11
@@ -879,17 +878,27 @@ class Orbitkicks():
         dpz_arr[indp] = 0.0
 
         #write 1D data
-        hh = ff.FortranRecordWriter('(6e14.6)')
-        f.write(hh.write(de_arr))
-        f.write('\n')
-        f.write(hh.write(dpz_arr))
-        f.write('\n')
-        f.write(hh.write(e_arr))
-        f.write('\n')
-        f.write(hh.write(pz_arr))
-        f.write('\n')
-        f.write(hh.write(mu_arr))
-        f.write('\n')
+        #hh = ff.FortranRecordWriter('(6e14.6)')
+        for i in range(0,len(de_arr),6):
+            f.write(''.join(f'{x:14.6e}' for x in de_arr[i:i+6]) +'\n')
+        for i in range(0,len(dpz_arr),6):
+            f.write(''.join(f'{x:14.6e}' for x in dpz_arr[i:i+6]) +'\n')
+        for i in range(0,len(e_arr),6):
+            f.write(''.join(f'{x:14.6e}' for x in e_arr[i:i+6]) +'\n')
+        for i in range(0,len(pz_arr),6):
+            f.write(''.join(f'{x:14.6e}' for x in pz_arr[i:i+6]) +'\n')
+        for i in range(0,len(mu_arr),6):
+            f.write(''.join(f'{x:14.6e}' for x in mu_arr[i:i+6]) +'\n')
+        #f.write(hh.write(de_arr))
+        #f.write('\n')
+        #f.write(hh.write(dpz_arr))
+        #f.write('\n')
+        #f.write(hh.write(e_arr))
+        #f.write('\n')
+        #f.write(hh.write(pz_arr))
+        #f.write('\n')
+        #f.write(hh.write(mu_arr))
+        #f.write('\n')
 
         #write 5D matrix, only write non-zero elements, i.e. sparse matrix
         for i in range(0,len(e_arr)):
@@ -899,8 +908,9 @@ class Orbitkicks():
                         for n in range(0,len(dpz_arr)):
                             val = pdedp[i,j,k,m,n]
                             if val != 0.0:
-                                #fortran indexing at 1
-                                f.write(m+1,n+1,i+1,j+1,k+1,hh.write([val]))
+                                #fortran indexing starts at 1!!
+                                f.write(m+1,n+1,i+1,j+1,k+1,f'{val:14.6e}')
+                                #f.write(m+1,n+1,i+1,j+1,k+1,hh.write([val]))
 
         #print footer information
         f.write(com+'\n')
@@ -917,6 +927,113 @@ class Orbitkicks():
         print('')
         
         return
+
+    def write_amode_aep(shot,tAmode,Amode,file_id,dev='D3D'):
+        """
+        Parameters
+        ----------
+        shot : integer
+            Shot number for TRANSP run
+        tAmode : float array
+            1D array for corresponding time values in TRANSP run
+        Amode : float array
+            1D array with corresponding mode amplitude values. These
+            values are relative to unity, e.g. Amode=1 corresponds to
+            whatever the physical amplitude (db/B) was calculated in
+            orbitkicks
+        file_id : integer
+            File ID suffix
+        dev : string
+            3 or 4 character device ID used by TRANSP
+        """
+        #print start
+        prefx = 'FILEAMODE_'  # output file name, prefix
+        suffx = '.AEP'  # output file name, suffix
+        filename = prefx + str(file_id) + suffx
+        print('Writing mode amplitude to '+filename+'\n')
+
+        lshot = int(shot)
+        ntm = len(tAmode)
+
+        # --------------------------------------------------------
+
+        # Get current date
+        #make date
+        today = datetime.today()
+        month = today.strftime("%b")
+        day = today.strftime("%d")
+        year = today.strftime("%y")
+        date = year+'-'+month+'-'+day
+        
+        #current_time = time.localtime()
+        #month = time.strftime('%b', current_time)
+        #day = time.strftime('%d', current_time)
+        #year = time.strftime('%y', current_time)
+        #date = f'{day}-{month}-{year}'
+
+        nd = 1  # 1-D data
+        nq = 0  # unknown
+        nr = 6  # number of decimal places f13.6
+        np = 0  # process code
+        ns = 1  # number of scalars
+        labelx = 'time'
+        unitsx = '   ms'
+
+        com = ';----END-OF-DATA-----------------COMMENTS:-----------'
+        com2 = "UFILE WRITTEN BY KORBPY'S write_amode_aep()"
+        com3 = 'SMOOTHING FACTORS, DELAY FACTORS:'
+        com4 = '       NONE'
+        com5 = 'USER COMMENTS:'
+        com6 = '        TEST FILE'
+
+        # --------------------------------------------------------
+        # Write Amode(t) data in UFILE format
+        with open(filename, 'w') as f:
+            # Write the data
+            tag = f';-SHOT #- F(X) DATA -UF5DWR- {date}'
+            f.write(f' {lshot:6d} {dev:<4}{nd:2d}{nq:2d}{nr:2d}          {tag}\n')
+
+            tag = ';-SHOT DATE-  UFILES ASCII FILE SYSTEM'
+            f.write('  '+date+'             ')
+            #f.write(f' {date:>10}          {tag}\n')
+
+            tag = ';-NUMBER OF ASSOCIATED SCALAR QUANTITIES-'
+            f.write(f' {ns:3d}                    {tag}\n')
+
+            f.write(' 0                           ;-SCALAR, LABEL FOLLOWS: \n')
+
+            tag = ';-INDEPENDENT VARIABLE LABEL: X-'
+            f.write(f' {labelx:<20}{unitsx:<10}{tag}\n')
+
+            f.write(' MODE AMPL. DATA              ;-DEPENDENT VARIABLE LABEL-\n')
+
+            tag = ';-PROC CODE- 0:RAW 1:AVG 2:SM 3:AVG+SM'
+            f.write(f' {np:1d}                    {tag}\n')
+
+            tag = ';-# OF X PTS- X,F(X) DATA FOLLOW:'
+            f.write(f' {ntm:10d}          {tag}\n')
+
+            # Write time variable (tAmode) in 6e13.6 format
+            for i in range(0, len(tAmode), 6):
+                f.write(''.join(f'{x:13.6e}' for x in tAmode[i:i+6]) + '\n')
+
+            # Write mode amplitude data (Amode>0.) in 6e13.6 format
+            for i in range(0, len(Amode), 6):
+                f.write(''.join(f'{x:13.6e}' for x in Amode[i:i+6]) + '\n')
+
+            # Write comments
+            f.write(f'{com}\n')
+            f.write(f'{com2}\n')
+            f.write(f'{com3}\n')
+            f.write(f'{com4}\n')
+            f.write(f'{com5}\n')
+            f.write(f'{com6}\n')
+
+            #print end
+            print('Finished writing mode amplitude to '+filename)
+            print('')
+            
+            return
     
     def pdedp_finalize(self,pdedp,de_arr,dpz_arr):
         """
