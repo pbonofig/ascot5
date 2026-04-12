@@ -18,7 +18,7 @@ dependencies:
   - h5py
   - mpi4py
   - xmlschema
-  - unyt
+  - unyt<3.1
   - wurlitzer
   - matplotlib
   - pyvista
@@ -43,7 +43,6 @@ dependencies:
   - llvm-openmp==15.*
   - libsanitizer
   - pylint
-  - fortranformat
   - pip:
     - clang==15.*
     - ctypeslib2

@@ -15,12 +15,11 @@ dependencies:
   - scipy
   - h5py
   - xmlschema
-  - unyt
+  - unyt<3.1
   - wurlitzer
   - matplotlib
   - pyvista
   - freeqdsk
-  - fortranformat
   - pip:
     - desc-opt
     - netCDF4
