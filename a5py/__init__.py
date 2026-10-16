@@ -31,6 +31,7 @@ from .ascotpy  import Ascotpy
 from .exceptions         import *
 from .routines.biosaw5   import BioSaw
 from .routines.afsi5     import Afsi
+from .routines.orbitkicks import Orbitkicks
 from .routines.markergen import MarkerGenerator
 from .routines.plotting  import openfigureifnoaxes, line2d
 
@@ -61,6 +62,9 @@ class Ascot(Ascotpy):
     afsi : :class:`.Afsi`
         Tool for calculating fusion source from thermal plasma and fast ion
         distributions.
+    orbitkicks : :class:`.Orbitkicks`
+        Tool for calculating orbit "kicks" or changes in energy and Pphi given
+        a supplied mode.
     markergen : :class:`.MarkerGenerator`
         Tool for generating markers from distributions.
     """
@@ -98,6 +102,7 @@ class Ascot(Ascotpy):
         self.data: Ascot5IO = None
         self.biosaw: BioSaw = BioSaw(self)
         self.afsi       = Afsi(self)
+        self.orbitkicks = Orbitkicks(self)
         self.markergen  = MarkerGenerator(self)
         if mute not in ["yes", "no", "err"]:
             raise ValueError("mute must be either \"yes\", \"no\" or \"err\".")
