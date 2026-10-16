@@ -161,7 +161,7 @@ class RunMixin(DistMixin):
             idx = mask[uidx]
 
         if ids is not None:
-            idx = np.logical_and(idx, np.in1d(self._inistate.get("ids"), ids))
+            idx = np.logical_and(idx, np.isin(self._inistate.get("ids"), ids))
 
         for i in range(len(qnt)):
             data[i] = data[i][idx]
@@ -215,15 +215,15 @@ class RunMixin(DistMixin):
         idx = np.ones(data[0].shape, dtype=bool)
         if endcond is not None:
             eids = self.getstate("ids", endcond=endcond)
-            idx = np.logical_and(idx, np.in1d(idarr, eids))
+            idx = np.logical_and(idx, np.isin(idarr, eids))
 
         if pncrid is not None:
             pncridarr = self._orbit.get(self._inistate, self._endstate,
                                        "pncrid")[0]
-            idx = np.logical_and(idx, np.in1d(pncridarr, pncrid))
+            idx = np.logical_and(idx, np.isin(pncridarr, pncrid))
 
         if ids is not None:
-            idx = np.logical_and(idx, np.in1d(idarr, ids))
+            idx = np.logical_and(idx, np.isin(idarr, ids))
 
         for i in range(len(data)):
             data[i] = data[i][idx]
@@ -1495,7 +1495,7 @@ class RunMixin(DistMixin):
             lost1 = self.getstate("ids", state="end",
                                   endcond=["rhomax", "wall"])
 
-            idx = ~np.in1d(ids, lost1)
+            idx = ~np.isin(ids, lost1)
             connlen[idx] *= -1
             clabel = "Connection length [" + str(connlen.units) + "]"
         else:
@@ -1712,7 +1712,7 @@ class RunMixin(DistMixin):
         self._require("_endstate")
         ids, weight, ekin = self.getstate("ids", "weight", "ekin", state="end", mode=mode)
         lost = self.getstate("ids", endcond='WALL', mode=mode)
-        lost = np.in1d(ids, lost)
+        lost = np.isin(ids, lost)
         ntotal = ids.size
         nsubset = np.logspace(np.log10(nmin), np.log10(ntotal), nsample)
         nsubset = nsubset.astype('i8')
