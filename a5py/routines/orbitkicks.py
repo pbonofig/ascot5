@@ -145,6 +145,7 @@ class Orbitkicks():
         mode_period = 2.0*np.pi/omega #sec
         dtsamp = 1.05*mode_period #sec
         tsim = dtsamp*50
+        dtav = 5e-7
 
         #check for too short smoothing time
         if dtav > 0.3*dtsamp:
@@ -219,20 +220,22 @@ class Orbitkicks():
             all_kicks = [] #kick storage 
             for j in range(0,len(id_arr)):
                 #get orbit info vs. time
-                torb,eorb,muorb,wgtorb,pitorb,psiorb,bphiorb,borb,rorb = vrun.getorbit("time",
-                                                                                       "ekin",
-                                                                                       "mu",
-                                                                                       "weight",
-                                                                                       "pitch",
-                                                                                       "psi",
-                                                                                       "bphi",
-                                                                                       "bnorm",
-                                                                                       "r",
-                                                                                       ids=id_arr[j])
+                torb,eorb,muorb,wgtorb,pitorb,psiorb,bphiorb,borb,rorb,zorb,pzorb = vrun.getorbit("time",
+                                                                                                  "ekin",
+                                                                                                  "mu",
+                                                                                                  "weight",
+                                                                                                  "pitch",
+                                                                                                  "psi",
+                                                                                                  "bphi",
+                                                                                                  "bnorm",
+                                                                                                  "r",
+                                                                                                  "z",
+                                                                                                  "pphi",
+                                                                                            ids=id_arr[j])
                 
                 #limit calculations to before marker is terminated
                 tind = np.where(torb < t_fin[j])[0]
-                tind = tind[1:]
+                #tind = tind[1:]
                 torb = torb[tind] #[s]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
@@ -242,8 +245,11 @@ class Orbitkicks():
                 bphiorb = bphiorb[tind] #[T]
                 borb = borb[tind] #[T]
                 rorb = rorb[tind] #[m]
+                zorb = zorb[tind] #[m]
+                pzorb = pzorb[tind] #[amu*m/s]
 
                 order = np.argsort(torb)
+                torb = torb[order]
                 eorb = eorb[order] #[eV]
                 muorb = muorb[order] #[eV/T]
                 wgtorb = wgtorb[order] #[#/s]
@@ -252,22 +258,83 @@ class Orbitkicks():
                 bphiorb = bphiorb[order] #[T]
                 borb = borb[order] #[T]
                 rorb = rorb[order] #[m]
+                zorb = zorb[order] #[m]
+                pzorb = pzorb[order] #[amu*m/s]
+
+                psi_spl  = bstr["fpsi"].ev(rorb, zorb)
+                bphi_spl = bstr["fphi"].ev(rorb, zorb)
+                btot_spl = bstr["ftot"].ev(rorb, zorb)
+
+                #print("psi ASCOT-spline max diff:", np.nanmax(np.abs(np.asarray(psiorb) - psi_spl)))
+                #print("bphi ASCOT-spline max diff:", np.nanmax(np.abs(np.asarray(bphiorb) - bphi_spl)))
+                #print("B ASCOT-spline max diff:", np.nanmax(np.abs(np.asarray(borb) - btot_spl)))
 
                 #conver to Roscoe units
                 eorb_keV = eorb/1.0e3 #[keV]
                 eorb_prime = self.energy_prime(eorb_keV,bstr,anum=anum,znum=znum)
 
                 muorb_norm = self.calc_mu_norm(muorb,eorb_keV,bstr)
+                #print('mypit',pitorb)
+                #ds = np.asarray(np.sign(pitorb))
+                #dmu = np.asarray(muorb_norm)
+                #db = np.asarray(borb)
+                #dbc = float(bstr["bcenter"])
+                #newpit = ds*np.sqrt(1-dmu*db/dbc)
+                #print('newpit',newpit)
+                #print(pitorb-newpit)
+                #pitorb = newpit
+                #pzorb_norm = self.calc_pz_orbit(eprime=eorb_prime,pitch=pitorb,
+                #                                bnorm=borb,bphi=bphiorb,
+                #                                psi=psiorb,bstr=bstr,rlocal=rorb)
+                pzorb_norm = self.calc_pz_orbit(
+                    eprime=eorb_prime,
+                    pitch=pitorb,
+                    bnorm=btot_spl,
+                    bphi=bphi_spl,
+                    psi=psi_spl,
+                    bstr=bstr,
+                    rlocal=rorb)
 
-                pzorb_norm = self.calc_pz_orbit(eprime=eorb_prime,pitch=pitorb,
-                                                bnorm=borb,bphi=bphiorb,
-                                                psi=psiorb,bstr=bstr,rlocal=rorb)
+                #cases = {
+                #    "orbit psi, orbit B": (psiorb, borb, bphiorb),
+                #    "spline psi, orbit B": (psi_spl, borb, bphiorb),
+                #    "orbit psi, spline B": (psiorb, btot_spl, bphi_spl),
+                #    "spline psi, spline B": (psi_spl, btot_spl, bphi_spl),
+                #}
+
+                #for name, (psi_use, B_use, Bphi_use) in cases.items():
+                #    pz = self.calc_pz_orbit(
+                #        eprime=eorb_prime,
+                #        pitch=pitorb,
+                #        bnorm=B_use,
+                #        bphi=Bphi_use,
+                #        psi=psi_use,
+                #        bstr=bstr,
+                #        rlocal=rorb,
+                #    )
+
+                #    good = np.isfinite(pz)
+                #    x = pz[good]
+                    
+                #    if len(x) > 1:
+                #        print(
+                #            name,
+                #            "p2p=", np.nanmax(x) - np.nanmin(x),
+                #            "std=", np.nanstd(x),
+                #            "first-last=", x[-1] - x[0],
+                #            "finite=", good.sum(), "/", len(good),
+                #        )
+                #    else:
+                #        print(name, "not enough finite points")
+                
                 #print(j,'a',eorb_keV)
                 #print(j,'aa',eorb_prime)
                 #print(j,'b',muorb_norm)
-                #print(j,'c',pzorb_norm)
+                print(j,'cc',pzorb)
+                print(j,'c',pzorb_norm)
                 #print(j,np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm),np.std(pzorb_norm))
-                #print(j,'w',torb)
+                print(j,'w',torb)
+                #print(j,'e',pzdum)
                 print(j,"Pz range:", np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm))
                 print(j,"Pz std:", np.std(pzorb_norm))
                 print(j,"Pz start/end:", pzorb_norm[0], pzorb_norm[-1],
@@ -358,6 +425,9 @@ class Orbitkicks():
             "SIM_MODE":sim_mode,
             "ENABLE_ADAPTIVE":0,
             "RECORD_MODE":rec_mode,
+            "FIXEDSTEP_USE_USERDEFINED":0,
+            "FIXEDSTEP_USERDEFINED":1e-9,
+            "FIXEDSTEP_GYRODEFINED":10,
             "ENDCOND_SIMTIMELIM":1, #end at max mileage
             "ENDCOND_RHOLIM":1, #end at rho>=1
             "ENDCOND_LIM_SIMTIME":10.0,
@@ -365,7 +435,7 @@ class Orbitkicks():
             "ENDCOND_MAX_CPUTIME":10.0,
             "ENDCOND_MAX_RHO":1.0,
             "ENABLE_ORBIT_FOLLOWING":1, #orbit following ON
-            "ENABLE_MHD":0, #include MHD
+            "ENABLE_MHD":1, #include MHD
             "ENABLE_ORBITWRITE":1, #store marker orbits
             "ORBITWRITE_MODE":1, #collect orbits on dt intervals
             "ORBITWRITE_NPOINT":ow_npoint, #max orbit collection points
@@ -475,7 +545,7 @@ class Orbitkicks():
         
         return bstr'''
 
-    def get_kick_bfield(self, refine=5):
+    def get_kick_bfield(self, refine=10):
         """
         Read ASCOT 2D axisymmetric magnetic-field data and build the
         normalization/interpolation structure needed by the kick model.
@@ -583,7 +653,7 @@ class Orbitkicks():
         psi_f = fpsi.ev(meshR, meshZ)
 
         # Axis field.
-        bcenter = float(ftot.ev(raxis, zaxis))
+        bcenter = float(ftot.ev(raxis, zaxis)[0])
 
         if not np.isfinite(bcenter) or abs(bcenter) <= 0.0:
             raise ValueError(f"Invalid axis magnetic field bcenter={bcenter}")
@@ -766,38 +836,6 @@ class Orbitkicks():
 
         return kE * energy_keV
 
-    '''def convert_en(self,myen,bstr,anum=2.0,znum=1.0):
-        """
-        Parameters
-        ----------
-        myen : float [eV]
-            Energy to convert to Roscoe units.
-        anum : int
-            Atomic mass number of ion
-        znum : int
-            Atmoic charge of ion
-        bstr : struct
-            Output structure from get_kick_bfield()
-
-        Eprime = ke*E, where E is in keV and
-        ke = 1000*A*(mp/qe)*g_0**2/(R_0*Z_p*B_0)**2
-        A = atomic mass number
-        mp = proton mass
-        qe = elementary charge
-        g_0 = g-function = B_0/fnorm*R_0, where fnorm=B_0 setting B_0=1
-        R_0 = major radius in [m] 
-        Z_p = elementary charge of ion
-        B_0 = mag field on axis [T]
-        """
-        qe = 1.602e-19 #[C]
-        mp = 1.673e-27 #[kg]
-        myen /= 1000.0 #[keV]
-        
-        ke = 1000.0*anum*(mp/qe)*(1.0/(znum*bstr['bcenter'])**2)
-        myen *= ke
-    
-        return myen'''
-
     def calc_mu_norm(self,mu_eVT,energy_keV,bstr):
          """
          Convert ASCOT magnetic moment [eV/T] to normalized ORBIT/AEP mu.
@@ -882,9 +920,9 @@ class Orbitkicks():
 
         pz = rho_parallel * g / psi_w - psi_norm
 
-        pz1 = -rho_parallel * g1 / psi_w - psi_norm
-        pz2 = -rho_parallel * g2 / psi_w - psi_norm
-        pz3 = -rho_parallel * g3 / psi_w - psi_norm
+        #pz1 = -rho_parallel * g1 / psi_w - psi_norm
+        #pz2 = -rho_parallel * g2 / psi_w - psi_norm
+        #pz3 = -rho_parallel * g3 / psi_w - psi_norm
         A1 = -rho_parallel * g1 / psi_w
         A2 = -rho_parallel * g2 / psi_w
         A3 = -rho_parallel * g3 / psi_w
@@ -892,7 +930,8 @@ class Orbitkicks():
         pz1 = A1 - B
         pz2 = A2 - B
         pz3 = A3 - B
-
+        print('term A',A3)
+        print('term B',B)
         #print("A range/std:", np.nanmax(A1)-np.nanmin(A1), np.nanstd(A1))
         #print("B range/std:", np.nanmax(B)-np.nanmin(B), np.nanstd(B))
         #print("corr(A,B):", np.corrcoef(A1, B)[0,1])
@@ -924,20 +963,20 @@ class Orbitkicks():
         #print(np.mean(pz2),np.std(pz2))
         #print(np.mean(pz3),np.std(pz3))
 
-        good = (
-            np.isfinite(pz3)
-            & np.isfinite(A3)
-            & np.isfinite(B)
-            & np.isfinite(g_mid)
-            & np.isfinite(rho_parallel)
-        )
-        dpz3 = pz3[good]
-        dA3 = A3[good]
-        dB = B[good]
-        dg_mid = g_mid[good]
-        drho_parallel = rho_parallel[good]
+        #good = (
+        #    np.isfinite(pz3)
+        #    & np.isfinite(A3)
+        #    & np.isfinite(B)
+        #    & np.isfinite(g_mid)
+        #    & np.isfinite(rho_parallel)
+        #)
+        #dpz3 = pz3[good]
+        #dA3 = A3[good]
+        #dB = B[good]
+        #dg_mid = g_mid[good]
+        #drho_parallel = rho_parallel[good]
         
-        print("Pz range:", np.nanmax(dpz3)-np.nanmin(dpz3))
+        '''print("Pz range:", np.nanmax(dpz3)-np.nanmin(dpz3))
         print("psi_norm min/max:", np.nanmin(psi_norm), np.nanmax(psi_norm))
         print("psi raw min/max:", np.nanmin(psi), np.nanmax(psi))
         print("psiouter min/max:", np.nanmin(psiouter), np.nanmax(psiouter))
@@ -951,7 +990,7 @@ class Orbitkicks():
         print("pitch min/max:", np.nanmin(pitch), np.nanmax(pitch))
         print("bnorm min/max:", np.nanmin(bnorm), np.nanmax(bnorm))
         print("rho_parallel min/max:", np.nanmin(drho_parallel), np.nanmax(drho_parallel))
-        print("Eprime:", np.nanmean(eprime))
+        print("Eprime:", np.nanmean(eprime))'''
 
         return pz3
 
@@ -1634,7 +1673,7 @@ class Orbitkicks():
             de = e1 - e0          # keV
             dp = p1 - p0          # normalized
             dmu = mu1 - mu0
-
+            print('test kick',dp,p1,p0)
             #potential diagnostic for mu conservation
             #if abs(dmu) > mutol:
                 #something
