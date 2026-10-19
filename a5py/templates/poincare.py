@@ -213,8 +213,8 @@ class PoincareTemplates():
             raise AscotInitException("bfield not initialized")
         grp  = self._ascot.data._get_group(inp["bfield"])
         d    = grp.read()
-        psi0 = d["psi0"]
-        psi1 = d["psi1"]
+        psi0 = d["psi0"][0]
+        psi1 = d["psi1"][0]
 
         # ...and this poloidal grid to evaluate values along the contour
         thgrid = np.linspace(0, 2*np.pi, nint)
