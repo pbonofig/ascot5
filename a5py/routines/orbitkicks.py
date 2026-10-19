@@ -5,6 +5,7 @@ the magnetic moment is held constant (true for low freq. modes)
 """
 import numpy as np
 import unyt as u
+
 from datetime import datetime
 from scipy.interpolate import RectBivariateSpline
 from scipy.constants import elementary_charge as QE
@@ -14,6 +15,11 @@ from scipy.constants import atomic_mass as AMU
 from a5py.ascot5io.options import Opt
 
 import matplotlib.pyplot as plt
+
+import h5py
+from a5py.ascot5io.marker import GC as mgc
+from a5py.ascot5io.marker import Prt as mprt
+#from a5py.ascot5io.options import Opt as myopt
 
 class Orbitkicks():
     """
@@ -105,6 +111,8 @@ class Orbitkicks():
         dpz_bins : int
             Number of bins in kick momentum array. Default is 29; must be odd!
         """
+        from a5py import Ascot
+        import subprocess
     
         #check de_bins is odd for 0 center
         if de_bins % 2 == 0:
@@ -171,7 +179,9 @@ class Orbitkicks():
         opt = Opt.get_default()
         self.set_simkick_opts(opt,tsim=tsim,ow_int=ow_int,
                               ow_npoint=ow_npoint,gcmode=gcmode)
-        self._ascot.simulation_initoptions(**opt)
+        #self._ascot.data.create_input("opt",**opt)
+        Opt.write_hdf5("test_kicks.h5",**opt)
+        #self._ascot.simulation_initoptions(**opt)
 
         #print rough storage for marker data (8 output variables below)
         mem = 8*nprt*ow_npoint*8/1e9
@@ -193,14 +203,30 @@ class Orbitkicks():
             if mrk is None:
                 mrk = self.uni_mrk_orbit_deposit(bstr,emin_keV=e_min_keV,emax_keV=e_max_keV,
                                                  anum=anum,znum=znum,nprt=nprt)
-            self._ascot.simulation_initmarkers(**mrk)
+            #self._ascot.data.create_input("gc",**mrk)
+            #self._ascot.write("test_kicks.h5")
+            dum = mgc.write_hdf5("test_kicks.h5",**mrk)
+            #self._ascot.simulation_initmarkers(**mrk)
 
             #do simulation
             print('Sub-simulation start...'+'\n')
-            self._ascot.simulation_initinputs() 
-            vrun = self._ascot.simulation_run()
-            print('Sub-simulation end'+'\n')
+            self._ascot.simulation_initinputs()
+
+            #self._ascot.write("test_kicks.h5")
             
+            #vrun = self._ascot.simulation_run()
+            subprocess.run(["/u/pbonofig/ascot_dev/ascot5/build/ascot5_main","test_kicks.h5"])
+            print('Sub-simulation end'+'\n')
+            a5_out = Ascot("test_kicks.h5")
+            id_arr = a5_out.getstate("ids", state="ini") #particle IDs
+            t_fin = a5_out.getstate("time", state="end") #end time [s]
+            #r_orb, z_orb, ekin_orb, psi_orb = a5_out.data.active.getorbit("r","z","ekin","psi",ids=1)
+            print(id_arr)
+            #with h5py.File("test_kicks.h5",'r') as fout:
+            #    id_arr = fout["results/endstate/ids"][:]
+            #    print(id_arr)
+            #mil = self._ascot.data.active.getorbit("ekin")
+            #print(mil)
             #get marker ids and lost times
             id_arr = vrun.getstate("ids",state="ini") #particle IDs
             t_fin = vrun.getstate("time",state="end") #end time [s]
