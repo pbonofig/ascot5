@@ -906,6 +906,14 @@ class Orbitkicks():
                    mu_min,mu_max,mu_bins,
                    pz_min,pz_max,pz_bins,bstr):
         """
+        Parameters
+         ----------
+        e_max_keV : float [keV]
+           Maximum energy bin for kicks in energy [keV]
+        anum : int
+           Atomic mass number for markers
+        znum : int
+           Charge state for markers
         mu_min : float [unitless]
             Minimum mag moment to calculate kicks. 
         mu_max : float [unitless]
@@ -918,12 +926,12 @@ class Orbitkicks():
             Minimum tor momentum to calculate kicks.
         pz_bins : int
             Number of bins in momentum array.
-        bstr : struct
-            Output structure from get_kick_bfield()
+        bstr : dictionary
+            Magnetic field structure from get_kick_bfield()
 
-        Check the range used for computing p(DE,DP|E,Pz,mu)
-        and adjust the (Pz,mu) range on-the-fly to optimize
-        the sampling
+        Checks the range used for computing p(DE,DP|E,Pz,mu)
+        and adjusts the (Pz,mu) range on-the-fly to optimize
+        the sampling.
         """
         #print start
         print('Checking Pz,mu ranges...'+'\n')
@@ -931,9 +939,9 @@ class Orbitkicks():
         #threshold limit to alter ranges
         dthresh = 0.1
 
-        #find boundary for mu and Pz based on energy range in pDEDP calc
+        #find boundary for mu and Pz based on energy range 
         
-        #max energy in Roscoe units
+        #max energy in ORBIT units
         dum_emax_prime = self.energy_prime(e_max_keV,bstr,anum=anum,znum=znum)
 
         #min and max b-field; rescale so Baxis=1.0 like ORBIT
@@ -959,6 +967,7 @@ class Orbitkicks():
         fracMu = (mu_max-dum_mumax)/mu_max
         fracPz = np.amax([abs((pz_max-dum_pzmax)/pz_max),abs((pz_min-dum_pzmin)/pz_min)])
 
+        #if update, then print it and update values
         if (fracMu > dthresh or fracPz > dthresh or
             dum_pzmin < pz_min or dum_pzmax > pz_max or
             dum_mumax > mu_max):
@@ -989,13 +998,13 @@ class Orbitkicks():
         """
         Parameters
         ----------
-        maxDE_kick : float [eV]
+        maxDE_kick : float [keV]
             Max running DE kick calculated
         maxDPz_kick : float
             Max running DPz kick calculated
-        de_min : float [eV]
+        de_min : float [keV]
             Minimum change in energy. 
-        de_max : float [eV]
+        de_max : float [keV]
             Maximum change in energy.
         de_bins : int
             Number of bins in kick energy array. 
@@ -1005,10 +1014,13 @@ class Orbitkicks():
             Minimum change in  momentum.
         dpz_bins : int
             Number of bins in kick momentum array.
+        margin : float
+            Factor at which to expand DE and DPz ranges beyon max kicks. Default is 1.1
+        edge_frac : float
+            Threshold at which to expaned DE and DPz ranges. Default is 0.9
 
-        Check the range used for computing p(DE,DP|E,Pz,mu)
-        and adjust the (DE,DPz) range on-the-fly to optimize
-        the sampling
+        Check the range used for (DE,DPz) and expand if maximum
+        kicks are found to exceed the current ranges.
         """
         #print start
         print('Checking (DE,DPz) boundaries...'+'\n')
@@ -1066,6 +1078,8 @@ class Orbitkicks():
         ----------
         myfile : string 
             Ufile containing orbit kicks. Default is pDEDP.AEP
+
+        Reads pDEDP.AEP ufile and saves values in a dictionary.
         """
         #print start
         print('Reading kick matrices from '+myfile+'\n')
@@ -1140,6 +1154,8 @@ class Orbitkicks():
 
         Reads float valuess from lines to arr starting at line lstart
         until arr is completely filled
+
+        Used for reading pDEDP.AEP ufile.
         """
         ix = 0
         lend = int(np.ceil(len(arr)/dl)) + lstart 
@@ -1177,6 +1193,8 @@ class Orbitkicks():
             Atmoic charge number of ion. Default is 1 for deuterium
         myfile : string 
             Ufile name containing orbit kicks to write to. Default is pDEDP.AEP
+
+        Writes pDEDP.AEP ufile for use in TRANSP.
         """
         #print start
         print('Writing kick output to '+myfile+'\n')
@@ -1363,6 +1381,10 @@ class Orbitkicks():
             File ID suffix
         dev : string
             3 or 4 character device ID used by TRANSP
+
+        Writes FILEAMODE_<file_id>.AEP containing the mode amplitude
+        as a function of time. This is to be combined with a corresponding
+        pDEDP.AEP ufile for use in TRANSP.
         """
         #print start
         prefx = 'FILEAMODE_'  # output file name, prefix
@@ -1462,6 +1484,8 @@ class Orbitkicks():
             Array of DE kicks in Roscoe units
         dpz_arr : float array
             Array of DP kicks in Roscoe units
+
+        Computes final normalization of the pDEDP 5D matrix.
         """
         #print start
         print('Finalizing pDEDP computation'+'\n')
@@ -1495,6 +1519,7 @@ class Orbitkicks():
         
         return
 
+    #simple function to return empty kicks
     def empty_kick_dict(self):
         mystr = {"eavgs":np.asarray([]),
                  "pzavgs":np.asarray([]),
@@ -1509,12 +1534,28 @@ class Orbitkicks():
                          eorb_keV,muorb_norm,pzorb_norm,
                          maxDE_kick,maxDPz_kick):
         """
-        Calculate kick samples.
+        Parameters
+        ----------
+        dtsamp : float [s]
+            Sampling time at which to compute DE and DPz
+        dtav : float [s]
+            Averaging window to smooth over high freq. noise
+        torb : array float [s]
+            Time points for orbit
+        eorb_keV : array float [keV]
+            Energy in keV for orbit
+        muorb_norm : array float [unitless]
+            ORBIT-normalized mu for orbit
+        pzorb_norm : array float [unitless]
+            ORBIT-normalized pz for orbit
+        maxDE_kick : float [keV]
+            Max computed kick in DE
+        maxDPz_kick : float [unitless]
+            Max computed kick in DPz
 
-        eorb_keV      : physical energy in keV
-        muorb_norm    : normalized ORBIT/AEP mu
-        pzorb_norm  : normalized ORBIT/AEP Pz
+        Calculates kick sampless for given orbit
         """
+        #needed values
         t = np.asarray(torb, dtype=float)
         e = np.asarray(eorb_keV, dtype=float)
         mu = np.asarray(muorb_norm, dtype=float)
@@ -1537,20 +1578,14 @@ class Orbitkicks():
         mu = mu[order]
         pz = pz[order]
 
-        #print('hey')
-        #print(t)
-        #print(e)
-        #print(mu)
-        #print(pz)
-        #print('alarm bells')
-        #for dummy in pz:
-        #    print(str(dummy)+'\n')
-
+        #too few time points, return empty kicks
         if len(t) < 3:
             return self.empty_kick_dict(), maxDE_kick, maxDPz_kick
 
+        #have a small offset before building kicks
         tstart = t[0] + 0.2*dtsamp
 
+        #storage
         eavgs = []
         pzavgs = []
         muavgs = []
@@ -1558,33 +1593,43 @@ class Orbitkicks():
         dpzkicks = []
         wgts = []
 
+        #start times for each sample
         starts = np.arange(tstart,t[-1]-dtsamp-dtav,dtsamp)
-       
+
+        #loop through orbit and calculate samples
         for ts in starts:
-            i0 = np.searchsorted(t, ts)
-            i1 = np.searchsorted(t, ts + dtav)
-            j0 = np.searchsorted(t, ts + dtsamp)
-            j1 = np.searchsorted(t, ts + dtsamp + dtav)
+            #sample start window
+            i0 = np.searchsorted(t,ts)
+            i1 = np.searchsorted(t,ts + dtav)
+
+            #sample end window
+            j0 = np.searchsorted(t,ts + dtsamp)
+            j1 = np.searchsorted(t,ts + dtsamp + dtav)
 
             if i1 <= i0 or j1 <= j0 or j1 > len(t):
                 continue
 
+            #start window values
             e0 = np.mean(e[i0:i1])
             p0 = np.mean(pz[i0:i1])
             mu0 = np.mean(mu[i0:i1])
 
+            #end window values
             e1 = np.mean(e[j0:j1])
             p1 = np.mean(pz[j0:j1])
             mu1 = np.mean(mu[j0:j1])
 
-            de = e1 - e0          # keV
-            dp = p1 - p0          # normalized
+            #calculated kicks
+            de = e1 - e0         
+            dp = p1 - p0         
             dmu = mu1 - mu0
             print('test kick',dp,p1,p0)
+            
             #potential diagnostic for mu conservation
             #if abs(dmu) > mutol:
-                #something
+                #do something
 
+            #DEBUGGING
             if abs(dp) > 0.3:
                 print("\nLarge DPz kick detected")
                 print(f"  dpz    = {dp:.6e}")
@@ -1600,9 +1645,11 @@ class Orbitkicks():
                 print(f"  nwin0  = {i1 - i0}")
                 print(f"  nwin1  = {j1 - j0}")
 
+            #update max kick values if found
             maxDE_kick = max(maxDE_kick,1.05*abs(de))
             maxDPz_kick = max(maxDPz_kick,1.05*abs(dp))
 
+            #append values to storage
             eavgs.append(e0)
             pzavgs.append(p0)
             muavgs.append(mu0)
@@ -1622,16 +1669,18 @@ class Orbitkicks():
         ----------
         pdedp : float array
             5D kick matrices
-        e_arr : float array [eV]
+        e_arr : float array [keV]
             Energy array values
-        pz_arr : float array
+        pz_arr : float array [unitless]
             Canonical momentum array values
-        de_arr : float array [eV]
+        de_arr : float array [keV]
             Kick energy array values
         dpz_arr : float array
             Kick momentum array values
         all_kicks : list of structures
             List of structures from pdedp_calc_kicks() with calculated kick values
+
+        Takes all kicks and tallies them up in the main pdedp 5D matrix.
         """
         #print start
         print('Recording pDEDP to 5D matrix...'+'\n')
@@ -1666,23 +1715,32 @@ class Orbitkicks():
         
         return
 
-    def uni_mrk_orbit_deposit(
-            self,
-            bstr,
-            emin_keV=1.0,
-            emax_keV=150.0,
-            limit_psi=0.95,
-            anum=2,
-            znum=1,
-            nprt=10000,
-            seed=None,
-            gcmode=True
-    ):
+    def uni_mrk_orbit_deposit(self,bstr,emin_keV=1.0,emax_keV=150.0,
+                              limit_psi=0.95,anum=2,znum=1,
+                              nprt=10000,seed=None,gcmode=True):
         """
-        Initialize markers using an ORBIT-kick-like full-deposition scheme
-        
-        This mimics the FORTRAN logic:
-        
+        Parameters
+        ----------
+        bstr : dictionary
+            Magnetic field structure from get_kick_bfield()
+        emin_keV : float [keV]
+            Minimum energy for markers. Default is 1 keV
+        emax_keV : float [keV]
+            Maximum energy for markers. Default is 150 keV
+        limit_psi : float [unitless]
+            Max normalized flux value at which to radially place markers
+        anum : int
+            Atomic mass number for markers. Default is 2 for deuterium
+        znum : int
+            Charge state for markers. Default is 1 for deuterium
+        nptr : int
+            Number of markers to create
+        seed : int
+            Seed for random number generator
+        gcmode : boolean
+            Boolean to make guiding-center [True] or full orbit [False] markers
+
+        Initialization routine follows that of ORBIT
         half particles:
             theta = 0, outer midplane, positive pitch
 
@@ -1691,6 +1749,8 @@ class Orbitkicks():
 
         pol = 0.001 + 0.999*min(1,limit_psi)*random
         energy = uniform [emin_keV, emax_keV]
+        phi = random [0, 2pi]
+        theta = 0
         zeta = random [0, 2pi]
         weight = 1
 
