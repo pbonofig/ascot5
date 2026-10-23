@@ -1,8 +1,12 @@
 """orbitkicks: Calculates orbit "kicks" of fast ions in axisymmetric 
 fusion devices. This is done by examining changes in the constants
 of motion: energy and canonical toroidal momentum. It is assumed that
-the magnetic moment is held constant (true for low freq. modes)
+the magnetic moment is held constant (true for low freq. modes where
+fmode << fgyro)
 """
+import os
+import h5py
+import subprocess
 import numpy as np
 import unyt as u
 
@@ -13,13 +17,10 @@ from scipy.constants import proton_mass as MP
 from scipy.constants import atomic_mass as AMU
 
 from a5py.ascot5io.options import Opt
-
-import matplotlib.pyplot as plt
-
-import h5py
 from a5py.ascot5io.marker import GC as mgc
 from a5py.ascot5io.marker import Prt as mprt
-#from a5py.ascot5io.options import Opt as myopt
+
+import matplotlib.pyplot as plt
 
 class Orbitkicks():
     """
@@ -32,7 +33,9 @@ class Orbitkicks():
     That is, the average change in energy and canonical
     toroidal momentum given the location in phase-space 
     (E,Pz,Mu). Theses calculations are performed with 
-    nprt number of markers for nloop iterations.
+    nprt number of markers for nloop iterations. This is done
+    to allow the user to control memory usage as the memory
+    can grow because actual orbit information is extracted.
 
     All other functions with this class are in support of 
     this main function. 
@@ -40,7 +43,8 @@ class Orbitkicks():
     The main output is a Ufile calle pDEDP.AEP. This is of
     the correct form to pass directly to TRANSP to calculate
     the enhanced anomalyous fast ion transport. Note that it
-    is species dependent. 
+    is species dependent. The output is also returned via the
+    simkick function for interactive use. 
 
     Inputs require a sampling time, tsamp, which should be a
     little longer than the mode period of interest. Optional 
@@ -59,7 +63,8 @@ class Orbitkicks():
 
     def simkick(self,
                 gcmode=True,nprt=10000,nloop=5,
-                anum=2,znum=1,mrk=None,dtav=2e-6,
+                anum=2,znum=1,mrk=None,
+                nperiods=50,dtav=5e-7,
                 e_min_keV=1.0,e_max_keV=150.0,e_bins=15,
                 pz_min=-1.2,pz_max=1.0,pz_bins=40,
                 mu_min=0.0,mu_max=1.4,mu_bins=16,
@@ -68,22 +73,27 @@ class Orbitkicks():
         """
         Parameters
         ----------
-        dtsamp : float [s]
-            Time over which to sample orbit kicks. Should be a little bigger than
-            the mode period of interest.
-        tsim : float [s]
-            Simulation run time. Default is 0.2 ms
         gcmode : boolean
-            Option to run in guiding-center. Default is True
+            Option to run in guiding-center. Default is True.
         nprt : int
-            Number of markers per iteration. Default is 10000
+            Number of markers per iteration. Default is 10000.
         nloop : int
             Number of iterations to perform, i.e. the total marker count will
             be nprt*nloop. Defualt is 5. 
-        e_min : float [eV]
-            Minimum energy to calculate kicks. Default 1000 eV
-        e_max : float [eV]
-            Maximum energy to calculate kicks. Default 150e3 eV
+        anum : int
+             Atomic mass number of markers. Default is 2 for deuterium.
+        znum : int
+             Atomic charge of markers. Default is 1 for deuterium.
+        mrk : Dictionary
+             User supplied marker input. Default is none.
+        nperiods : int
+             Number of mode periods over which to simulate. Default is 50.
+        dtav : float [s]
+             Averging time window for high freq. noise. Default is 5e-7 s.
+        e_min_keV : float [keV]
+            Minimum energy to calculate kicks. Default 1 keV
+        e_max_keV : float [keV]
+            Maximum energy to calculate kicks. Default 150 keV
         e_bins : int
             Number of bins in energy array. Default is 15
         pz_min : float [unitless]
@@ -98,10 +108,10 @@ class Orbitkicks():
             Minimum mag moment to calculate kicks. Default 1.0
         mu_bins : int
             Number of bins in mag moment array. Default is 16
-        de_min : float [eV]
-            Minimum change in energy. Default 1e-6 eV
-        de_max : float [eV]
-            Maximum change in energy. Default 2e-6 eV
+        de_min_keV : float [keV]
+            Minimum change in energy. Default 1e-6 keV
+        de_max : float [keV]
+            Maximum change in energy. Default 2e-6 keV
         de_bins : int
             Number of bins in kick energy array. Default is 29; must be odd!
         dpz_min : float [unitless]
@@ -110,10 +120,13 @@ class Orbitkicks():
             Minimum change in  momentum. Default 2e-8
         dpz_bins : int
             Number of bins in kick momentum array. Default is 29; must be odd!
+
+        Main orbitkick calculation routine. Writes pDEDP.AEP ufile and returns
+        values interactively.
         """
-        from a5py import Ascot
-        import subprocess
-    
+        #needed for reading and writing to hdf5 file
+        from a5py import Ascot as a5io
+        
         #check de_bins is odd for 0 center
         if de_bins % 2 == 0:
             raise ValueError("de_bins must be odd so zero is a bin center")
@@ -141,7 +154,7 @@ class Orbitkicks():
         #get mode frequency
         mhd = self._ascot.data.mhd.active.read()
         omega = np.asarray(mhd["omega"],dtype=float).ravel() #rad/s
-        nmodes = np.unique(np.asarray(mhd["nmodes"],dtype=int).ravel()) #tor mode num
+        nmodes = np.unique(np.asarray(mhd["nmodes"],dtype=int).ravel()) #num of modes
         
         #check only one mode is active
         if len(nmodes) > 1:
@@ -152,8 +165,7 @@ class Orbitkicks():
         #set sampling time and sim time
         mode_period = 2.0*np.pi/omega #sec
         dtsamp = 1.05*mode_period #sec
-        tsim = dtsamp*50
-        dtav = 5e-7
+        tsim = dtsamp*nperiods
 
         #check for too short smoothing time
         if dtav > 0.3*dtsamp:
@@ -179,7 +191,13 @@ class Orbitkicks():
         opt = Opt.get_default()
         self.set_simkick_opts(opt,tsim=tsim,ow_int=ow_int,
                               ow_npoint=ow_npoint,gcmode=gcmode)
-        #self._ascot.data.create_input("opt",**opt)
+
+        #delete any old options present
+        with h5py.File("test_kicks.h5", "a") as f:
+            if "options" in f:
+                del f["options"]
+
+        #write new options
         Opt.write_hdf5("test_kicks.h5",**opt)
         #self._ascot.simulation_initoptions(**opt)
 
@@ -201,35 +219,57 @@ class Orbitkicks():
         
             #initialize markers
             if mrk is None:
-                mrk = self.uni_mrk_orbit_deposit(bstr,emin_keV=e_min_keV,emax_keV=e_max_keV,
-                                                 anum=anum,znum=znum,nprt=nprt)
-            #self._ascot.data.create_input("gc",**mrk)
-            #self._ascot.write("test_kicks.h5")
-            dum = mgc.write_hdf5("test_kicks.h5",**mrk)
-            #self._ascot.simulation_initmarkers(**mrk)
+                mrk_loop = self.uni_mrk_orbit_deposit(bstr,emin_keV=e_min_keV,emax_keV=e_max_keV,
+                                                      anum=anum,znum=znum,nprt=nprt,gcmode=gcmode)
+            else:
+                mrk_loop = mrk
+
+            #Remove old markers and results before this sub-run
+            #This prevents ASCOT from using stale active marker/result groups.
+            #Results groups store qids pointing to marker groups.
+            #If marker is deleted but results is kept, a5py can later fail
+            #while rebuilding the tree because old results reference missing
+            #marker qids.
+            with h5py.File("test_kicks.h5", "a") as f:
+                for group in ["marker","results"]:
+                    if group in f:
+                        del f[group]
+
+            #write markers
+            if gcmode:
+                mgc.write_hdf5("test_kicks.h5",**mrk_loop)
+            else:
+                mprt.write_hdf5("test_kicks.h5",**mrk_loop)
+            #self._ascot.simulation_initmarkers(**mrk_loop)
 
             #do simulation
             print('Sub-simulation start...'+'\n')
-            self._ascot.simulation_initinputs()
-
-            #self._ascot.write("test_kicks.h5")
-            
+            #self._ascot.simulation_initinputs()
             #vrun = self._ascot.simulation_run()
-            subprocess.run(["/u/pbonofig/ascot_dev/ascot5/build/ascot5_main","test_kicks.h5"])
+            #nmpi = int(os.environ.get("SLURM_NTASKS","32"))
+            nmpi=1
+            ascot_mpi_exe = "/u/pbonofig/ascot_dev/ascot5/build/ascot5_main"
+            command=["mpirun","-np",str(nmpi),ascot_mpi_exe,"--in=test_kicks.h5"]
+            try:
+                #Capture the exact error output from mpirun
+                result = subprocess.run(command,check=True)
+            except subprocess.CalledProcessError as e:
+                print("MPI FAILED WITH EXIT CODE:", e.returncode)
+                raise
+
+            #run ended, get results
             print('Sub-simulation end'+'\n')
             a5_out = Ascot("test_kicks.h5")
-            id_arr = a5_out.getstate("ids", state="ini") #particle IDs
-            t_fin = a5_out.getstate("time", state="end") #end time [s]
-            #r_orb, z_orb, ekin_orb, psi_orb = a5_out.data.active.getorbit("r","z","ekin","psi",ids=1)
-            print(id_arr)
-            #with h5py.File("test_kicks.h5",'r') as fout:
-            #    id_arr = fout["results/endstate/ids"][:]
-            #    print(id_arr)
-            #mil = self._ascot.data.active.getorbit("ekin")
-            #print(mil)
+            self._ascot = a5_out
+            vrun = a5_out.data.active
+
+            #sanity check that run completed
+            if vrun is None:
+                raise RuntimeError("No active ASCOT result found!.")
+
             #get marker ids and lost times
-            id_arr = vrun.getstate("ids",state="ini") #particle IDs
-            t_fin = vrun.getstate("time",state="end") #end time [s]
+            id_arr = vrun.getstate("ids", state="ini") #particle IDs
+            t_fin = vrun.getstate("time", state="end") #end time [s]
 
             #check kick ranges based on inputs only on first loop
             if pdedp_optimize == True:
@@ -238,7 +278,7 @@ class Orbitkicks():
                                                 pz_min,pz_max,pz_bins,bstr)
 
             #needed for magnetic quantities
-            self._ascot.input_init(bfield=True) 
+            self._ascot.input_init(bfield=True)
 
             #print start
             print('Computing (DE,DP) kicks...'+'\n')
@@ -257,7 +297,7 @@ class Orbitkicks():
                                                                                                   "r",
                                                                                                   "z",
                                                                                                   "pphi",
-                                                                                            ids=id_arr[j])
+                                                                                                  ids=id_arr[j])
                 
                 #limit calculations to before marker is terminated
                 tind = np.where(torb < t_fin[j])[0]
@@ -291,81 +331,49 @@ class Orbitkicks():
                 bphi_spl = bstr["fphi"].ev(rorb, zorb)
                 btot_spl = bstr["ftot"].ev(rorb, zorb)
 
-                #print("psi ASCOT-spline max diff:", np.nanmax(np.abs(np.asarray(psiorb) - psi_spl)))
-                #print("bphi ASCOT-spline max diff:", np.nanmax(np.abs(np.asarray(bphiorb) - bphi_spl)))
-                #print("B ASCOT-spline max diff:", np.nanmax(np.abs(np.asarray(borb) - btot_spl)))
-
+                if len(torb) < 2:
+                    print("Skipping marker %s: fewer than 2 orbit samples"%id_arr[j])
+                    continue
+                
                 #conver to Roscoe units
                 eorb_keV = eorb/1.0e3 #[keV]
                 eorb_prime = self.energy_prime(eorb_keV,bstr,anum=anum,znum=znum)
 
                 muorb_norm = self.calc_mu_norm(muorb,eorb_keV,bstr)
-                #print('mypit',pitorb)
-                #ds = np.asarray(np.sign(pitorb))
-                #dmu = np.asarray(muorb_norm)
-                #db = np.asarray(borb)
-                #dbc = float(bstr["bcenter"])
-                #newpit = ds*np.sqrt(1-dmu*db/dbc)
-                #print('newpit',newpit)
-                #print(pitorb-newpit)
-                #pitorb = newpit
-                #pzorb_norm = self.calc_pz_orbit(eprime=eorb_prime,pitch=pitorb,
-                #                                bnorm=borb,bphi=bphiorb,
-                #                                psi=psiorb,bstr=bstr,rlocal=rorb)
-                pzorb_norm = self.calc_pz_orbit(
-                    eprime=eorb_prime,
-                    pitch=pitorb,
-                    bnorm=btot_spl,
-                    bphi=bphi_spl,
-                    psi=psi_spl,
-                    bstr=bstr,
-                    rlocal=rorb)
+            
+                pzorb_norm = self.calc_pz_orbit(eprime=eorb_prime,
+                                                pitch=pitorb,
+                                                bnorm=btot_spl,
+                                                bphi=bphi_spl,
+                                                psi=psi_spl,
+                                                bstr=bstr,
+                                                rlocal=rorb)
 
-                #cases = {
-                #    "orbit psi, orbit B": (psiorb, borb, bphiorb),
-                #    "spline psi, orbit B": (psi_spl, borb, bphiorb),
-                #    "orbit psi, spline B": (psiorb, btot_spl, bphi_spl),
-                #    "spline psi, spline B": (psi_spl, btot_spl, bphi_spl),
-                #}
-
-                #for name, (psi_use, B_use, Bphi_use) in cases.items():
-                #    pz = self.calc_pz_orbit(
-                #        eprime=eorb_prime,
-                #        pitch=pitorb,
-                #        bnorm=B_use,
-                #        bphi=Bphi_use,
-                #        psi=psi_use,
-                #        bstr=bstr,
-                #        rlocal=rorb,
-                #    )
-
-                #    good = np.isfinite(pz)
-                #    x = pz[good]
-                    
-                #    if len(x) > 1:
-                #        print(
-                #            name,
-                #            "p2p=", np.nanmax(x) - np.nanmin(x),
-                #            "std=", np.nanstd(x),
-                #            "first-last=", x[-1] - x[0],
-                #            "finite=", good.sum(), "/", len(good),
-                #        )
-                #    else:
-                #        print(name, "not enough finite points")
+                #sanity checks for completed marker data
+                if pzorb_norm.size == 0 or not np.any(np.isfinite(pzorb_norm)):
+                    print("Skipping marker %s: empty/non-finite Pz orbit "%id_arr[j])
+                    continue
+                if eorb_keV.size == 0 or not np.any(np.isfinite(eorb_keV)):
+                    print("Skipping marker %s: empty/non-finite Ekev orbit "%id_arr[j])
+                    continue
+                if muorb_norm.size == 0 or not np.any(np.isfinite(muorb_norm)):
+                    print("Skipping marker %s: empty/non-finite mu orbit "%id_arr[j])
+                    continue
                 
-                #print(j,'a',eorb_keV)
-                #print(j,'aa',eorb_prime)
-                #print(j,'b',muorb_norm)
+                print(j,'a',eorb_keV)
+                print(j,'aa',eorb_prime)
+                print(j,'b',muorb_norm)
                 print(j,'cc',pzorb)
                 print(j,'c',pzorb_norm)
                 #print(j,np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm),np.std(pzorb_norm))
                 print(j,'w',torb)
                 #print(j,'e',pzdum)
-                print(j,"Pz range:", np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm))
-                print(j,"Pz std:", np.std(pzorb_norm))
-                print(j,"Pz start/end:", pzorb_norm[0], pzorb_norm[-1],
-                      "difference:", pzorb_norm[-1] - pzorb_norm[0])
-                print(j, "mu_norm:", np.nanmean(muorb_norm))
+                if pzorb_norm.size != 0:
+                    print(j,"Pz range:", np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm))
+                    print(j,"Pz std:", np.std(pzorb_norm))
+                    print(j,"Pz start/end:", pzorb_norm[0], pzorb_norm[-1],
+                          "difference:", pzorb_norm[-1] - pzorb_norm[0])
+                    print(j, "mu_norm:", np.nanmean(muorb_norm))
                 
                 #average full-orbit over gyroperiod
                 #can't record GC and GO positions simultaneously
@@ -382,10 +390,12 @@ class Orbitkicks():
 
                 #calculate kicks for given orbit
                 kick_str,maxDE_kick,maxDPz_kick = self.pdedp_calc_kicks(dtsamp,dtav,torb,
-                                                                        e_for_kick,mu_for_kick,pz_for_kick,
-                                                                        maxDE_kick,maxDPz_kick)
+                                                                        e_for_kick,
+                                                                        mu_for_kick,
+                                                                        pz_for_kick,
+                                                                        maxDE_kick,
+                                                                        maxDPz_kick)
                 all_kicks.append(kick_str)
-                #print(j,'d',maxDE_kick,maxDPz_kick)
 
             #loop through markers has ended
             print('Finished computing (DE,DP) kicks'+'\n')
@@ -404,12 +414,14 @@ class Orbitkicks():
                                     all_kicks)
 
             #free markers and diagnostics for next iteration
-            self._ascot.simulation_free(markers=True,diagnostics=True)
+            #self._ascot.simulation_free(markers=True,diagnostics=True)
 
             #print end of loop
             print('Completed iteration '+str(iloop+1)+'/'+str(nloop)+'\n')
 
+        ################################################################
         #iteration loops have ended and we have finished all simulations
+        ################################################################
         
         #normalize matrix
         self.pdedp_finalize(pdedp,de_arr,dpz_arr)
@@ -434,9 +446,15 @@ class Orbitkicks():
         opt : options group
             Default options object
         tsim : float [s]
-            Simulation run time. Default is 0.2ms
+            Simulation run time. Default is 0.2 ms
+        ow_int : float [s]
+            Time interval to collect orbit info. Default is 1e-8 s
+        ow_npoint : int
+            Number of orbit points to collect. Default is 3e5
         gcmode : boolean
             Option to run in guiding-center. Default is True
+
+        Returns structure containing ASCOT run options for simkick().
         """
         #settings dependent on GC or F0
         if gcmode: 
@@ -461,7 +479,7 @@ class Orbitkicks():
             "ENDCOND_MAX_CPUTIME":10.0,
             "ENDCOND_MAX_RHO":1.0,
             "ENABLE_ORBIT_FOLLOWING":1, #orbit following ON
-            "ENABLE_MHD":1, #include MHD
+            "ENABLE_MHD":0, #include MHD
             "ENABLE_ORBITWRITE":1, #store marker orbits
             "ORBITWRITE_MODE":1, #collect orbits on dt intervals
             "ORBITWRITE_NPOINT":ow_npoint, #max orbit collection points
@@ -470,149 +488,48 @@ class Orbitkicks():
             
         return
 
-    '''def get_kick_bfield(self):
+    def get_kick_bfield(self,refine=5):
         """
         Parameters
         ----------
-        self : Class
-            Ascot object used to run Orbitkicks
-        """
-        #unpack initialized Bfield
-        self._ascot.input_init(bfield=True)
-        bout = self._ascot.data.bfield.active.read()
-        raxis = bout['axisr'][0]
-        zaxis = bout['axisz'][0]
-        br = bout['br']
-        bz = bout['bz']
-        bphi = bout['bphi']
-        btot = np.sqrt(br**2+bz**2+bphi**2)
-        rmin = bout['rmin'][0]
-        rmax = bout['rmax'][0]
-        nr = bout['nr'][0]
-        zmin = bout['zmin'][0]
-        zmax = bout['zmax'][0]
-        nz = bout['nz'][0]
-        psiwall = bout['psi1'][0]
-        psi = bout['psi']
-        psiaxis = bout["psi0"][0]
-        self._ascot.input_free()
-        
-        #1D R and Z arrays
-        rarr = np.linspace(rmin,rmax,nr) #[m]
-        zarr = np.linspace(zmin,zmax,nz) #[m]
+        refine : int
+            Factor to increase B-field grid resolution. Deault is 5
 
-        #interpolate to finer grid
-        ftot = RectBivariateSpline(rarr,zarr,btot) #[T]
-        fphi = RectBivariateSpline(rarr,zarr,bphi) #[T]
-        fpsi = RectBivariateSpline(rarr,zarr,psi) #[Wb]
-        newr = np.linspace(rmin,rmax,nr*5) #[m]
-        newz = np.linspace(zmin,zmax,nz*5) #[m]
-        meshR, meshZ = np.meshgrid(newr,newz,indexing="ij")
-        btot = ftot.ev(meshR,meshZ)
-        bphi = fphi.ev(meshR,meshZ)
-        psi = fpsi.ev(meshR,meshZ)
-
-        #construct normalized psi grid
-        psi_norm_grid = (psi-psiaxis)/(psiwall-psiaxis)
-        mask_lcfs = (psi_norm_grid >= 0.0) & (psi_norm_grid <= 1.0)
-        if not np.any(mask):
-            raise ValueError("Psi mask is empty. Check psiaxis and psiwall sign convention.")
-
-        #bcenter
-        bcenter = ftot.ev(raxis,zaxis) #[T]
-
-        #min and max Btot within LCFS
-        mask = psi <= psiwall
-        bsub = btot[mask]
-        bmin = np.amin(bsub)
-        bmax = np.amax(bsub)
-
-        #find R(lcfs,theta=0) and psiouter
-        indr = np.argmin(np.abs(newr-raxis))
-        indz = np.argmin(np.abs(newz-zaxis))
-        subpsi = psi[:,indz] #psi at Z=zaxis
-        indpsi = np.argmin(np.abs(subpsi-psiwall)) #R index close to psiwall
-        rlcfs = newr[indpsi]
-        router = newr[indr:]
-        psiouter = subpsi[indr:]
-
-        #outer midplane
-        r_mid = newr[indr:]
-        z_mid = np.full_like(r_mid,zaxis)
-        psi_mid = psi[indr:,indz]
-        btot_mid = psi[indr:,indz]
-        bphi_mid = psi[indr:,indz]
-
-        #keep only confined part
-        psi_norm_mid = (psi_mid - psiaxis)/(psiwall - psiaxis)
-        mid_mask = (psi_norm_mid >= 0.0) & (psi_norm_mid <= 1.0)
-        r_mid = r_mid[mid_mask]
-        z_mid = z_mid[mid_mask]
-        psi_mid = psi_mid[mid_mask]
-        btot_mid = btot_mid[mid_mask]
-        bphi_mid = bphi_mid[mid_mask]
-
-        #sort by R
-        order = np.argsort(r_mid)
-        r_mid = r_mid[order]
-        z_mid = z_mid[order]
-        psi_mid = psi_mid[order]
-        btot_mid= btot_mid[order]
-        bphi_mid = bphi_mid[order]
-        
-        bstr = {'bcenter':bcenter,'bmin':bmin,'bmax':bmax,
-                'raxis':raxis,'zaxis':zaxis,'rlcfs':rlcfs,
-                'router':router,'psiouter':psiouter,'psiwall':psiwall,
-                'psiaxis':psiaxis,'fnorm':abs(bcenter),
-                'psi_grid':psi,'btot_grid':btot,
-                'bphi_grid':bphi,'mask_lcfs':mask_lcfs,
-                'r_mid':r_mid,'z_mid':z_mid,'psi_mid':psi_mid,
-                'btot_mid':btot_mid,'bphi_mid':bphi_mid}
-        
-        return bstr'''
-
-    def get_kick_bfield(self, refine=10):
-        """
-        Read ASCOT 2D axisymmetric magnetic-field data and build the
-        normalization/interpolation structure needed by the kick model.
+        Reads ASCOT 2D axisymmetric magnetic-field data and builds the
+        normalization/interpolation structure needed for simkick and
+        marker initialization. Returns dictionary with needed magnetic 
+        field quantities.
 
         This implementation supports simple 2D gridded axisymmetric fields
         with br, bz, bphi, psi on an R-Z grid.
-
-        Returns
-        -------
-        bstr : dict
-        Magnetic-field and normalization data.
         """
-
+        #small helper function to convert array to scalar quantity
         def _scalar(x):
             arr = np.asarray(x)
             return float(arr.ravel()[0])
 
-        required_keys = [
-            "axisr", "axisz",
-            "br", "bz", "bphi", "psi",
-            "rmin", "rmax", "nr",
-            "zmin", "zmax", "nz",
-            "psi0", "psi1",
-        ]
+        #keys to pull from bfield structure
+        required_keys = ["axisr", "axisz","br", "bz", "bphi", "psi",
+                         "rmin", "rmax", "nr","zmin", "zmax", "nz",
+                         "psi0", "psi1"]
 
+        #initialize bfield for reading
         self._ascot.input_init(bfield=True)
 
+        #read bfield then free it
         try:
             bout = self._ascot.data.bfield.active.read()
         finally:
             self._ascot.input_free()
 
+        #check to make sure it has needed keys
         for key in required_keys:
             if key not in bout:
-                raise KeyError(
-                    f"Active ASCOT bfield is missing key '{key}'. "
-                    "This get_kick_bfield() only supports simple 2D "
-                    "axisymmetric gridded fields."
-                )
-
-        # Scalars.
+                raise KeyError(f"Active ASCOT bfield is missing key '{key}'. "
+                               "get_kick_bfield() only supports simple 2D "
+                               "axisymmetric gridded fields.")
+            
+        #Scalar quantities
         raxis = _scalar(bout["axisr"])
         zaxis = _scalar(bout["axisz"])
         
@@ -627,18 +544,15 @@ class Orbitkicks():
         psiaxis = _scalar(bout["psi0"])
         psiwall = _scalar(bout["psi1"])
 
-        if np.isclose(psiwall, psiaxis):
-            raise ValueError("psi1 and psi0 are equal; cannot normalize flux.")
-
-        # Arrays.
+        #Array quantities
         br = np.asarray(bout["br"], dtype=float)
         bz = np.asarray(bout["bz"], dtype=float)
         bphi = np.asarray(bout["bphi"], dtype=float)
         psi = np.asarray(bout["psi"], dtype=float)
 
-        expected = (nr, nz)
-        transposed = (nz, nr)
-
+        #check sizes and shapes
+        expected = (nr,nz)
+        transposed = (nz,nr)
         if br.shape == expected:
             pass
         elif br.shape == transposed:
@@ -647,106 +561,99 @@ class Orbitkicks():
             bphi = bphi.T
             psi = psi.T
         else:
-            raise ValueError(
-                f"Unexpected bfield array shape {br.shape}; expected "
-                f"{expected} or {transposed}."
-            )
+            raise ValueError(f"Unexpected bfield array shape {br.shape}; expected "
+                             f"{expected} or {transposed}.")
 
+        #total b=field
         btot = np.sqrt(br**2 + bz**2 + bphi**2)
 
-        # Coarse grid.
-        rarr = np.linspace(rmin, rmax, nr)
-        zarr = np.linspace(zmin, zmax, nz)
+        #Coarse grid
+        rarr = np.linspace(rmin,rmax,nr)
+        zarr = np.linspace(zmin,zmax,nz)
 
-        kx = min(3, nr - 1)
-        ky = min(3, nz - 1)
+        #splines for array interpolation
+        ftot = RectBivariateSpline(rarr,zarr,btot)
+        fphi = RectBivariateSpline(rarr,zarr,bphi)
+        fr = RectBivariateSpline(rarr,zarr,br)
+        fz = RectBivariateSpline(rarr,zarr,bz)
+        fpsi = RectBivariateSpline(rarr,zarr,psi)
 
-        ftot = RectBivariateSpline(rarr, zarr, btot, kx=kx, ky=ky)
-        fphi = RectBivariateSpline(rarr, zarr, bphi, kx=kx, ky=ky)
-        fpsi = RectBivariateSpline(rarr, zarr, psi, kx=kx, ky=ky)
-
-        # Refined grid.
-        nr_f = max(refine * nr, nr)
-        nz_f = max(refine * nz, nz)
-
+        #Finer grid
+        nr_f = refine*nr
+        nz_f = refine*nz
         newr = np.linspace(rmin, rmax, nr_f)
         newz = np.linspace(zmin, zmax, nz_f)
 
+        #Meshes for R and Z
         meshR, meshZ = np.meshgrid(newr, newz, indexing="ij")
 
-        btot_f = ftot.ev(meshR, meshZ)
-        bphi_f = fphi.ev(meshR, meshZ)
-        psi_f = fpsi.ev(meshR, meshZ)
+        #Evaluate total B, Bphi, and psi on finer grid
+        btot_f = ftot.ev(meshR,meshZ)
+        bphi_f = fphi.ev(meshR,meshZ)
+        psi_f = fpsi.ev(meshR,meshZ)
 
-        # Axis field.
+        #On axis field
         bcenter = float(ftot.ev(raxis, zaxis)[0])
 
-        if not np.isfinite(bcenter) or abs(bcenter) <= 0.0:
-            raise ValueError(f"Invalid axis magnetic field bcenter={bcenter}")
-
+        #fnorm parameter for unit conversion
         fnorm = abs(bcenter)
 
-        # Normalized poloidal flux.
-        psi_norm = (psi_f - psiaxis) / (psiwall - psiaxis)
+        #Normalized poloidal flux
+        psi_norm = (psi_f-psiaxis)/(psiwall psiaxis)
 
+        #limit to within LCFS
         mask_lcfs = (psi_norm >= 0.0) & (psi_norm <= 1.0)
-
         if not np.any(mask_lcfs):
-            raise ValueError(
-                "LCFS mask is empty. Check psi0/psi1 convention or bfield data."
-            )
-
+            raise ValueError("LCFS mask is empty. Check psi0/psi1 convention or bfield data.")
         bsub = btot_f[mask_lcfs]
         bmin = float(np.nanmin(bsub))
         bmax = float(np.nanmax(bsub))
 
-        # Midplane line.
+        #Midplane line
         iz0 = int(np.argmin(np.abs(newz - zaxis)))
         ir_axis = int(np.argmin(np.abs(newr - raxis)))
 
+        #get values on midplane
         r_line = newr
-        psi_line = psi_f[:, iz0]
-        psi_norm_line = (psi_line - psiaxis) / (psiwall - psiaxis)
-        btot_line = btot_f[:, iz0]
-        bphi_line = bphi_f[:, iz0]
+        psi_line = psi_f[:,iz0]
+        psi_norm_line = (psi_line-psiaxis)/(psiwall-psiaxis)
+        btot_line = btot_f[:,iz0]
+        bphi_line = bphi_f[:,iz0]
 
-        def _make_branch(mask, name):
+        #subroutine to get quantities on inner and outer midplane
+        #needed for Pz construction
+        def _make_branch(mask,name):
+            #limit quantities to mask
             r_b = r_line[mask]
             psi_b = psi_line[mask]
             psi_norm_b = psi_norm_line[mask]
             btot_b = btot_line[mask]
             bphi_b = bphi_line[mask]
 
+            #make sure finite values
             finite = (
                 np.isfinite(r_b)
                 & np.isfinite(psi_b)
                 & np.isfinite(psi_norm_b)
                 & np.isfinite(btot_b)
-                & np.isfinite(bphi_b)
-            )
-
+                & np.isfinite(bphi_b))
             r_b = r_b[finite]
             psi_b = psi_b[finite]
             psi_norm_b = psi_norm_b[finite]
             btot_b = btot_b[finite]
             bphi_b = bphi_b[finite]
 
-            if len(r_b) < 2:
-                raise ValueError(f"Not enough points on {name} midplane branch.")
-
-            # Sort by normalized flux for easy inversion psi_norm -> R.
+            #Sort by normalized flux for easy inversion psi_norm -> R
             order = np.argsort(psi_norm_b)
-
             r_b = r_b[order]
             psi_b = psi_b[order]
             psi_norm_b = psi_norm_b[order]
             btot_b = btot_b[order]
             bphi_b = bphi_b[order]
 
-            # Remove duplicate psi_norm points, because np.interp wants
-            # a clean monotonic x-array.
-            psi_unique, unique_idx = np.unique(psi_norm_b, return_index=True)
-
+            #Remove duplicate psi_norm points, because np.interp wants
+            #a clean monotonic x-array.
+            psi_unique, unique_idx = np.unique(psi_norm_b,return_index=True)
             r_b = r_b[unique_idx]
             psi_b = psi_b[unique_idx]
             btot_b = btot_b[unique_idx]
@@ -757,22 +664,18 @@ class Orbitkicks():
                 "psi": psi_b,
                 "psi_norm": psi_unique,
                 "btot": btot_b,
-                "bphi": bphi_b,
-            }
+                "bphi": bphi_b}
 
+        #get inner and outer midplane quantites
         confined_line = (psi_norm_line >= 0.0) & (psi_norm_line <= 1.0)
-        
         outer_mask = confined_line & (r_line >= raxis)
         inner_mask = confined_line & (r_line <= raxis)
-        
-        outer = _make_branch(outer_mask, "outer")
-        inner = _make_branch(inner_mask, "inner")
+        outer = _make_branch(outer_mask,"outer")
+        inner = _make_branch(inner_mask,"inner")
 
-        rlcfs_outer = float(np.nanmax(outer["r"]))
-        rlcfs_inner = float(np.nanmin(inner["r"]))
-
+        #return structure
         bstr = {
-            # Basic normalization.
+            #Scalar quantities
             "bcenter": bcenter,
             "bmin": bmin,
             "bmax": bmax,
@@ -782,7 +685,7 @@ class Orbitkicks():
             "psiwall": psiwall,
             "fnorm": fnorm,
             
-            # Refined grid.
+            #Fine grid
             "r_grid": newr,
             "z_grid": newz,
             "psi_grid": psi_f,
@@ -791,37 +694,58 @@ class Orbitkicks():
             "psi_norm_grid": psi_norm,
             "mask_lcfs": mask_lcfs,
 
-            # Spline evaluators.
+            #Spline evaluators
             "ftot": ftot,
             "fphi": fphi,
+            "fphi": fr,
+            "fphi": fz,
             "fpsi": fpsi,
 
-            # Branches for R(psi) on midplane.
+            #Branches for R(psi) on midplane
             "outer": outer,
             "inner": inner,
             
-            # Backward-compatible names used by calc_pz_orbit().
+            #outer midplane quantities for Pz construction
             "router": outer["r"],
             "bphiouter":outer["bphi"],
-            "psiouter": outer["psi"],
-            "rlcfs": rlcfs_outer,
-            "rlcfs_inner": rlcfs_inner}
+            "psiouter": outer["psi"]}
 
         return bstr
 
     def find_gc_equiv(self,torb,eorb,pzorb,muorb,borb,ami,zmi):
+        """
+        Parameters
+        ----------
+        torb : float array [s]
+            Time points for orbit
+        eorb : float array [keV]
+            Energy for orbit
+        pzorb : float array [unitless]
+            Pz_norm for orbit
+        muorb : float array [unitless]
+            mu_norm for orbit
+        borb : float array [T]
+            Local magnetic field for orbit
+        ami : int array
+            Atomic mass number for orbit
+        zmi : int array
+            Charge state for orbit
+
+        Averages eorb, pzorb, and muorb over gyroperiod.
+        """
+        #calculate gyroperiod
         mass = ami*MP #[kg]
         charge = zmi*QE #[C]
-
         t = np.asarray(torb,dtype=float)
         b = np.asarray(borb,dtype=float)
-        
         gyroT = 2.0*np.pi*mass/(charge*b)
 
+        #storage
         e_gc = np.full_like(eorb,np.nan,dtype=float)
         pz_gc = np.full_like(pzorb,np.nan,dtype=float)
         mu_gc = np.full_like(muorb,np.nan,dtype=float)
 
+        #average (E,Pz,mu) over gyroperiod
         i = 0
         while i < len(t)-1:
             t_next = t[i] + gyroT[i]
@@ -841,38 +765,54 @@ class Orbitkicks():
 
     def energy_prime(self,energy_keV,bstr,anum=2.0,znum=1.0):
         """
+        Parameters
+        ----------
+        energy_keV : float array [keV]
+            Array of energy values in keV
+        bstr : dictionary
+            Magnetic field structure from get_kick_bfield()
+        anum : int
+            Atomic mass number. Default is 2.0 for deuterium.
+        znum : int
+            Charge state. Default is 1.0 for deuterium.
+
         Convert physical energy in keV to ORBIT-normalized E'.
         
-        E' = kE * E_keV
+        E' = kE*E_keV
         
-        kE = 1e3 * A * mp/qe * g0^2 / (R0 * Zp * B0)^2
+        kE = 1e3*A  mp/qe* g0^2/(R0*Zp*B0)^2
         """
         energy_keV = np.asarray(energy_keV, dtype=float)
 
         b0 = float(bstr["bcenter"])
         r0 = float(bstr["raxis"])
 
-        # If fnorm = B0, then g0 = R0
+        #If fnorm = B0, then g0 = R0
         g0 = r0
 
-        mp = 1.67262192369e-27
-        qe = 1.602176634e-19
+        kE = 1.0e3*anum*(MP/QE)*g0**2/(r0*znum*b0)**2
 
-        kE = 1.0e3 * anum * (mp / qe) * g0**2 / (r0 * znum * b0)**2
-
-        return kE * energy_keV
+        return kE*energy_keV
 
     def calc_mu_norm(self,mu_eVT,energy_keV,bstr):
          """
-         Convert ASCOT magnetic moment [eV/T] to normalized ORBIT/AEP mu.
+         Parameters
+         ----------
+         mu_eVT : float array [eVT]
+            Array of magnetic moment values in SI units.
+         energy_keV : float array [keV]
+            Array of energy values in keV.
+         bstr : dictionary
+            Magnetic field structure from get_kick_bfield()
 
-         mu_norm = mu * B0 / E
+         Converts ASCOT magnetic moment [eV/T] to ORBIT-normalized mu.
 
-         E should be the same physical energy convention used for the kick matrix.
-         Here energy_keV is converted back to eV for consistency with mu_eVT.
+         mu_norm = mu*B0/E
          """
-         mu_eVT = np.asarray(mu_eVT, dtype=float)
+         #convert energy from keV to eV
          energy_eV = np.asarray(energy_keV, dtype=float)*1.0e3
+
+         mu_eVT = np.asarray(mu_eVT,dtype=float)
 
          b0 = float(bstr["bcenter"])
 
@@ -880,146 +820,87 @@ class Orbitkicks():
 
     def calc_pz_orbit(self,eprime,pitch,bnorm,bphi,psi,bstr,rlocal):
         """
+        Parameters
+         ----------
+         eprime : float array [unitless]
+            Array of dimensionless energy values from energy_prime().
+         pitch : float array [unitless]
+            Array of pitch values, vpar/v
+         bnorm : float array [T]
+            Local magnetic field orbit values
+         psi : float array [Wb]
+            Local poloidal flux orbit values
+         bstr : dictionary
+            Magnetic field structure from get_kick_bfield()
+         rlocal : float array [m]
+            Major radius orbit values
+
         Compute ORBIT-normalized canonical toroidal momentum Pz.
 
-        Inputs
-        ------
-        eprime : array
-        ORBIT-normalized kinetic energy E'_k.
-        pitch : array
-        v_parallel / v.
-        bnorm : array
-        |B| at marker location [T].
-        bphi : array
-        Toroidal magnetic field at marker location [T].
-        psi : array
-        ASCOT poloidal flux at marker location [Wb].
-        bstr : dict
-        Magnetic normalization data.
+        Pz = rho_parallel*g/psiw - psipol
+
+        g = Bphi/fnorm*R(psipol,theta=0)
+
+        rho_parallel = pitch*sqrt(2*eprime)*fnorm/B
+
+        NOTE: ORBIT normalizes B-field such that B0 = 1.0 on axis.
+        NOTE: ORBIT defines pitch such that positive pitch is 
+              relative to plasma current.
         """
+        #needed orbit array values
+        eprime = np.asarray(eprime,dtype=float)
+        pitch = np.asarray(pitch,dtype=float)
+        bnorm = np.asarray(bnorm,dtype=float)
+        bphi = np.asarray(bphi,dtype=float)
+        psi = np.asarray(psi,dtype=float)
+        rlocal = np.asarray(rlocal,dtype=float)
 
-        eprime = np.asarray(eprime, dtype=float)
-        pitch = np.asarray(pitch, dtype=float)
-        bnorm = np.asarray(bnorm, dtype=float)
-        bphi = np.asarray(bphi, dtype=float)
-        psi = np.asarray(psi, dtype=float)
-        rlocal = np.asarray(rlocal, dtype=float)
-
+        #magnetic field quantities
         b0 = float(bstr["bcenter"])
         r0 = float(bstr["raxis"])
         fnorm = float(bstr["fnorm"])
         psi_axis = float(bstr["psiaxis"])
         psi_lcfs = float(bstr["psiwall"])
        
-        # Use relative flux because ASCOT psi may not be zero on-axis.
+        #Normalize flux and 0 on axis
         psi_rel = psi - psi_axis
         psi_lcfs_rel = psi_lcfs - psi_axis
 
-        # ORBIT relation: Psi_lcfs = Psi_w * fnorm
+        #ORBIT relation: Psi_lcfs = Psi_w * fnorm
         psi_w = psi_lcfs_rel / fnorm
 
-        # R at same psi on outer midplane.
+        #Quantities needed on outer midplane
         router = np.asarray(bstr["router"], dtype=float)
         psiouter = np.asarray(bstr["psiouter"], dtype=float)
         bphiouter = np.asarray(bstr["bphiouter"], dtype=float)
 
-        gouter = router * bphiouter / fnorm
+        #g-function on outer midplane
+        gouter = router*bphiouter/fnorm
 
-        # Ensure interpolation arrays are monotonically ordered.
+        #Ensure interpolation arrays are monotonically ordered
         order = np.argsort(psiouter)
         r_mid = np.interp(psi,psiouter[order],router[order],left=np.nan,right=np.nan)
         bphi_mid = np.interp(psi,psiouter[order],bphiouter[order],left=np.nan,right=np.nan)
         g_mid = np.interp(psi,psiouter[order],gouter[order],left=np.nan,right=np.nan)
 
-        # g(Psi)
-        g = bphi/fnorm*r_mid
-        g1 = rlocal*bphi/fnorm
-        g2 = r_mid*bphi/fnorm
-        g3 = r_mid*bphi_mid/fnorm
-        g3 = g_mid
+        #g-function
+        g = r_mid*bphi_mid/fnorm
 
-        # rho_parallel
-        rho_parallel = pitch * np.sqrt(2.0 * eprime) * fnorm / bnorm
+        #rho_parallel
+        rho_parallel = pitch*np.sqrt(2.0*eprime)*fnorm/bnorm
 
-        # normalized flux term
-        psi_norm = psi_rel / psi_lcfs_rel
+        #normalized flux term
+        psi_norm = psi_rel/psi_lcfs_rel
 
-        pz = rho_parallel * g / psi_w - psi_norm
+        pz = -rho_parallel*g/psi_w - psi_norm
 
-        #pz1 = -rho_parallel * g1 / psi_w - psi_norm
-        #pz2 = -rho_parallel * g2 / psi_w - psi_norm
-        #pz3 = -rho_parallel * g3 / psi_w - psi_norm
-        A1 = -rho_parallel * g1 / psi_w
-        A2 = -rho_parallel * g2 / psi_w
-        A3 = -rho_parallel * g3 / psi_w
+        #DEBUGGING
+        A = -rho_parallel*g/psi_w
         B = psi_norm
-        pz1 = A1 - B
-        pz2 = A2 - B
-        pz3 = A3 - B
-        print('term A',A3)
+        print('term A',A)
         print('term B',B)
-        #print("A range/std:", np.nanmax(A1)-np.nanmin(A1), np.nanstd(A1))
-        #print("B range/std:", np.nanmax(B)-np.nanmin(B), np.nanstd(B))
-        #print("corr(A,B):", np.corrcoef(A1, B)[0,1])
-        #print("slope dB/dA:", np.polyfit(A1, B, 1)[0])
-        #print("A range/std:", np.nanmax(A2)-np.nanmin(A2), np.nanstd(A2))
-        #print("B range/std:", np.nanmax(B)-np.nanmin(B), np.nanstd(B))
-        #print("corr(A,B):", np.corrcoef(A2, B)[0,1])
-        #print("slope dB/dA:", np.polyfit(A2, B, 1)[0])
-        #print("A range/std:", np.nanmax(A3)-np.nanmin(A3), np.nanstd(A3))
-        #print("B range/std:", np.nanmax(B)-np.nanmin(B), np.nanstd(B))
-        #print("corr(A,B):", np.corrcoef(A3, B)[0,1])
-        #print("slope dB/dA:", np.polyfit(A3, B, 1)[0])
-
-        #print('whoa')
-        #print(psi_norm)
-        #print("psi_axis      =", bstr["psiaxis"])
-        #print("psi_lcfs      =", bstr["psiwall"])
-        #print("psi_lcfs_rel  =", bstr["psiwall"] - bstr["psiaxis"])
-        #print("psi_norm min/max =", np.nanmin(psi_norm), np.nanmax(psi_norm))
-
-        #print('whoa2')
-        #print(g1)
-        #print(g2)
-        #print(g3)
-        #print(pz1)
-        #print(pz2)
-        #print(pz3)
-        #print(np.mean(pz1),np.std(pz1))
-        #print(np.mean(pz2),np.std(pz2))
-        #print(np.mean(pz3),np.std(pz3))
-
-        #good = (
-        #    np.isfinite(pz3)
-        #    & np.isfinite(A3)
-        #    & np.isfinite(B)
-        #    & np.isfinite(g_mid)
-        #    & np.isfinite(rho_parallel)
-        #)
-        #dpz3 = pz3[good]
-        #dA3 = A3[good]
-        #dB = B[good]
-        #dg_mid = g_mid[good]
-        #drho_parallel = rho_parallel[good]
-        
-        '''print("Pz range:", np.nanmax(dpz3)-np.nanmin(dpz3))
-        print("psi_norm min/max:", np.nanmin(psi_norm), np.nanmax(psi_norm))
-        print("psi raw min/max:", np.nanmin(psi), np.nanmax(psi))
-        print("psiouter min/max:", np.nanmin(psiouter), np.nanmax(psiouter))
-        print("r_mid finite fraction:", np.mean(np.isfinite(r_mid)))
-        print( "bphi_mid finite fraction:", np.mean(np.isfinite(bphi_mid)))
-        print("g_mid min/max:", np.nanmin(dg_mid), np.nanmax(dg_mid))
-        corr = np.corrcoef(dA3, dB)[0, 1]
-        slope = np.polyfit(dA3, dB, 1)[0]
-        print("corr(A,B):", corr)
-        print("slope dB/dA:", slope)
-        print("pitch min/max:", np.nanmin(pitch), np.nanmax(pitch))
-        print("bnorm min/max:", np.nanmin(bnorm), np.nanmax(bnorm))
-        print("rho_parallel min/max:", np.nanmin(drho_parallel), np.nanmax(drho_parallel))
-        print("Eprime:", np.nanmean(eprime))'''
-
-        return pz3
-
+    
+        return pz
 
     def check_bdry(self,e_max_keV,anum,znum,
                    mu_min,mu_max,mu_bins,
@@ -1790,14 +1671,15 @@ class Orbitkicks():
             bstr,
             emin_keV=1.0,
             emax_keV=150.0,
-            limit_psi=1.0,
+            limit_psi=0.95,
             anum=2,
             znum=1,
             nprt=10000,
             seed=None,
+            gcmode=True
     ):
         """
-        Initialize markers using an ORBIT-kick-like full-deposition scheme.
+        Initialize markers using an ORBIT-kick-like full-deposition scheme
         
         This mimics the FORTRAN logic:
         
@@ -1812,102 +1694,156 @@ class Orbitkicks():
         zeta = random [0, 2pi]
         weight = 1
 
-        This does not sample uniformly in constants-of-motion space directly.
-        It samples ORBIT-like initial marker coordinates and later you bin the
-        resulting trajectories in (E, Pphi, mu).
+        If gcmode=True, return an ASCOT guiding-center marker dictionary
+        If gcmode=False, return an ASCOT full-orbit particle marker dictionary
         """
-
+        #random number generator
         rng = np.random.default_rng(seed)
-        
-        if nprt < 2:
-            raise ValueError("nprt must be at least 2.")
 
+        #split particles to inner and outer halves
         n_outer = nprt // 2
         n_inner = nprt - n_outer
 
+        #get zaxis
         zaxis = float(bstr["zaxis"])
 
+        #inner and outer midplane radii and psis
         outer = bstr["outer"]
         inner = bstr["inner"]
-
         psi_outer_norm = np.asarray(outer["psi_norm"], dtype=float)
         r_outer = np.asarray(outer["r"], dtype=float)
-
         psi_inner_norm = np.asarray(inner["psi_norm"], dtype=float)
         r_inner = np.asarray(inner["r"], dtype=float)
 
-        lim = min(1.0, float(limit_psi))
+        #limit in psi at which to deposit
+        lim = min(1.0,float(limit_psi))
 
-        # Match the FORTRAN expression:
-        # pol = .001 + .999*min(1,limit_Psi)*ranx()
-        # If limit_psi=1, this samples [0.001, 1.0].
-        psi_norm_outer = 0.001 + 0.999 * lim * rng.random(n_outer)
-        psi_norm_inner = 0.001 + 0.999 * lim * rng.random(n_inner)
+        #Matches ORBIT deposition
+        #pol = .001 + .999*min(1,limit_Psi)*ranx()
+        #Samples [0.001,psi_lim]
+        psi_norm_outer = 0.001 + 0.999*lim*rng.random(n_outer)
+        psi_norm_inner = 0.001 + 0.999*lim*rng.random(n_inner)
 
-        # Clip to branch availability.
-        psi_norm_outer = np.clip(
-            psi_norm_outer,
-            np.nanmin(psi_outer_norm),
-            np.nanmax(psi_outer_norm),
-        )
-        psi_norm_inner = np.clip(
-            psi_norm_inner,
-            np.nanmin(psi_inner_norm),
-            np.nanmax(psi_inner_norm),
-        )
+        #Clip to inner or outer branch 
+        psi_norm_outer = np.clip(psi_norm_outer,
+                                 np.nanmin(psi_outer_norm),
+                                 np.nanmax(psi_outer_norm))
+        psi_norm_inner = np.clip(psi_norm_inner,
+                                 np.nanmin(psi_inner_norm),
+                                 np.nanmax(psi_inner_norm))
 
-        # Invert normalized flux -> R on each midplane branch.
+        #Invert normalized flux to R on each midplane branch
         r1 = np.interp(psi_norm_outer, psi_outer_norm, r_outer)
         r2 = np.interp(psi_norm_inner, psi_inner_norm, r_inner)
 
+        #combine halves for full R and Z arrays
         r = np.concatenate([r1, r2])
         z = np.full(nprt, zaxis)
 
-        # Pitch.
-        # Outer/co-moving: positive random pitch.
-        # Inner/counter-moving: negative random pitch.
+        #Pitch
+        #Outer/co-moving: positive random pitch.
+        #Inner/counter-moving: negative random pitch.
         pitch_outer = rng.random(n_outer)
         pitch_inner = -rng.random(n_inner)
         pitch = np.concatenate([pitch_outer, pitch_inner])
 
-        # Energy.
+        #Energy
         energy_keV = emin_keV + rng.random(nprt) * (emax_keV - emin_keV)
         energy_eV = energy_keV * 1.0e3
 
-        # Angles.
-        phi = rng.random(nprt) * 360.0
-        zeta = rng.random(nprt) * 2.0 * np.pi
+        #Angles
+        phi = rng.random(nprt) * 360.0 #toroidal angle
+        zeta = rng.random(nprt) * 2.0 * np.pi #gyroangle
 
-        # Species.
-        anum_arr = np.full(nprt, anum, dtype=int)
-        znum_arr = np.full(nprt, znum, dtype=int)
+        #Species
+        anum_arr = np.full(nprt,anum,dtype=int)
+        znum_arr = np.full(nprt,znum,dtype=int)
 
-        # ASCOT marker mass is in amu, charge in elementary charges.
+        #ASCOT marker mass is in amu, charge in elementary charges
         mass_amu = anum*MP/AMU
-        
-        mass = np.full(nprt, mass_amu)
-        charge = np.full(nprt, znum)
+        mass = np.full(nprt,mass_amu)
+        charge = np.full(nprt,znum)
 
+        #marker IDs, uniform weight, and t=0 as initial time
         ids = np.arange(1, nprt + 1, dtype=int)
         weight = np.ones(nprt)
         time = np.zeros(nprt)
 
-        marker = {
-            "n": nprt,
-            "ids": ids,
-            "r": r * u.m,
-            "phi": phi * u.degree,
-            "z": z * u.m,
-            "pitch": pitch,
-            "weight": weight,
-            "time": time * u.s,
-            "energy": energy_eV * u.eV,
-            "zeta": zeta * u.rad,
-            "mass": mass * u.amu,
-            "charge": charge * u.e,
-            "anum": anum_arr,
-            "znum": znum_arr}
+        #return structures
+        if gcmode:
+            marker = {
+                "n":nprt,
+                "ids":ids,
+                "mass":mass*u.amu,
+                "charge":charge*u.e,
+                "r":r*u.m,
+                "phi":phi*u.degree,
+                "z":z*u.m,
+                "energy":energy_eV*u.eV,
+                "pitch":pitch,
+                "zeta":zeta*u.rad,
+                "anum":anum_arr,
+                "znum":znum_arr,
+                "weight":weight/u.s,
+                "time":time*u.s}
+        else:
+            #local magnetic field
+            br = np.asarray(bstr["fbr"].ev(r, z),dtype=float)
+            bphi = np.asarray(bstr["fphi"].ev(r, z),dtype=float)
+            bz = np.asarray(bstr["fbz"].ev(r, z),dtype=float)
+            bnorm = np.sqrt(br**2+bz**2+bphi**2)
 
+            #magnetic field unit vector
+            bhat_r = br/bnorm
+            bhat_phi = bphi/bnorm
+            bhat_z = bz/bnorm
+
+            #Velocity components
+            vtot = np.sqrt(2.0*energy_eV*QE/(mass_amu*AMU))
+            vpar = pitch*vtot
+            vperp = np.sqrt(1.0-pitch**2)*vtot
+
+            #make orthonormal basis perp to b-vector
+            #take a reference direction as zhat
+            #unless local field is close to zhat, then use rhat
+            refvec = np.zeros_like(bvec)
+            refvec[:,2] = 1.0
+            nearly_zhat = np.abs(bhat_z) > 0.95
+            ref[nearly_zhat,:] = np.array([1.0,0.0,0.0])
+
+            #first unit vector of perpendicular basis
+            e1 = np.cross(bvec,ref)
+            e1norm = np.linalg.norm(e1,axis=1)
+            e1 = e1/e1norm[:,None]
+
+            #second unit vector of perpendicular basis
+            e2 = np.cross(bvec,e1)
+
+            #gyrophase in perpendicular basis
+            gyro = (np.cos(zeta)[:,None]*e1 + np.sin(zeta)[:,None]*e2)
+
+            #construct velocity vector
+            vvec = vpar[:,None]*bvec + vperp[:,None]*gyro
+            vr = vvec[:,0]
+            vphi = vvec[:,1]
+            vz = vvec[:,2]
+            
+            marker = {
+                "n":nprt,
+                "ids":ids,
+                "mass":mass*u.amu,
+                "charge":charge*u.e,
+                "r":r*u.m,
+                "phi":phi*u.degree,
+                "z":z*u.m,
+                "vr":vr*u.m/u.s,
+                "vphi":vphi*u.m/u.s,
+                "vz":vz*u.m/u.s,
+                "anum":anum_arr,
+                "znum":znum_arr,
+                "weight": weight/u.s,
+                "time": time*u.s}
+                
         return marker
 
     def calc_resfrac(self,myfile='pDEDP.AEP'):
@@ -2003,19 +1939,19 @@ class Orbitkicks():
         dprms = resdata['dprms']
         if de == True:
             val = derms
-            fig.suptitle('$\mathrm{DE_{RMS}}$',fontsize=12)
+            fig.suptitle(r'$\mathrm{DE_{RMS}}$',fontsize=12)
             zmax = np.amax(val)
         elif dp == True:
             val = dprms
-            fig.suptitle('$\mathrm{DPz_{RMS}}$',fontsize=12)
+            fig.suptitle(r'$\mathrm{DPz_{RMS}}$',fontsize=12)
             zmax = np.amax(val)
         elif resfrac == True:
             val = rfrac
-            fig.suptitle('$\mathrm{Resfrac}$',fontsize=12)
+            fig.suptitle(r'$\mathrm{Resfrac}$',fontsize=12)
             zmax = np.amax(val)
         else:
             val = asm
-            fig.suptitle('$\mathrm{Asymmetry}$',fontsize=12)
+            fig.suptitle(r'$\mathrm{Asymmetry}$',fontsize=12)
             zmax = np.abs(np.amax(val))
             zmin = np.abs(np.amin(val))
 
@@ -2024,10 +1960,10 @@ class Orbitkicks():
             for j in range(0,ncols):
                 #make y-labels
                 if j == 0:
-                    axarr[i,j].set_ylabel('$\mathrm{\\mu B_0/E}$',fontsize=12)
+                    axarr[i,j].set_ylabel(r'$\mathrm{\\mu B_0/E}$',fontsize=12)
                 #make x-labels
                 if i == nrows-1:
-                    axarr[i,j].set_xlabel('$\mathrm{P_{\\phi}}$',fontsize=12)
+                    axarr[i,j].set_xlabel(r'$\mathrm{P_{\\phi}}$',fontsize=12)
 
                 #labelsizes
                 axarr[i,j].tick_params(axis='x',labelsize=10)
@@ -2036,7 +1972,7 @@ class Orbitkicks():
         for i in range(0,len(e_arr)):
             row = i//ncols
             col = i%ncols
-            axarr[row,col].set_title('$\mathrm{E=%s}$'%str(round(e_arr[i],2)),fontsize=10)
+            axarr[row,col].set_title(r'$\mathrm{E=%s}$'%str(round(e_arr[i],2)),fontsize=10)
 
             vplot = np.transpose(val[i,:,:])
             if asym == True:
@@ -2102,7 +2038,7 @@ class Orbitkicks():
                                  squeeze=False,sharex=True,sharey=True)
 
         #plot title
-        fig.suptitle('$\mathrm{Kick: \, P_{\\phi}=%s, \, \\mu=%s}$' %
+        fig.suptitle(r'$\mathrm{Kick: \, P_{\\phi}=%s, \, \\mu=%s}$' %
                      (round(pz_used,2),round(mu_used,2)),fontsize=12)
 
         #make plot labels
@@ -2110,11 +2046,11 @@ class Orbitkicks():
             for j in range(0,ncols):
                 #make y-labels
                 if j == 0:
-                    axarr[i,j].set_ylabel('$\mathrm{\\Delta P_{\\phi} (1/%s \\mu s)}$'%tstep_str,
+                    axarr[i,j].set_ylabel(r'$\mathrm{\\Delta P_{\\phi} (1/%s \\mu s)}$'%tstep_str,
                                           fontsize=12)
                 #make x-labels
                 if i == nrows-1:
-                    axarr[i,j].set_xlabel('$\mathrm{\\Delta E \, (keV/%s \\mu s)}$'%tstep_str,
+                    axarr[i,j].set_xlabel(r'$\mathrm{\\Delta E \, (keV/%s \\mu s)}$'%tstep_str,
                                           fontsize=12)
 
                 #labelsizes
@@ -2124,7 +2060,7 @@ class Orbitkicks():
         for i in range(0,len(e_arr)):
             row = i//ncols
             col = i%ncols
-            axarr[row,col].set_title('$\mathrm{E=%s}$'%str(round(e_arr[i],2)),fontsize=10)
+            axarr[row,col].set_title(r'$\mathrm{E=%s}$'%str(round(e_arr[i],2)),fontsize=10)
 
             khold = np.transpose(pdedp[i,ipz,imu,:,:])
             zmax = np.amax(pdedp[i,ipz,imu,:,:])
@@ -2139,110 +2075,3 @@ class Orbitkicks():
         plt.show()
 
         return
-    
-    '''def uni_mrk(self,emin=1000.0,emax=1.0e5,pmin=-1.0,pmax=1.0,
-                rhomax=0.99,anum=2,znum=1,nprt=10000):
-        #print start
-        print('Initializing uniform markers...'+'\n')
-        
-        #constants
-        pmass = 1.6726e-27 #kg
-        q = 1.602e-19 #Coulomb
-        amu = 1.6605e-27 #kg
-
-        #marker ids
-        ids = np.array(range(1,nprt+1))
-
-        #default is deuterium
-        anum = np.ones(nprt,int)*anum
-        znum = np.ones(nprt,int)*znum
-
-        #mass has units amu and charge in units e
-        mass = np.ones(nprt)*anum*(pmass/amu)
-        charge = np.ones(nprt)*znum
-
-        #give equal weights
-        weight = np.ones(nprt)
-
-        #start time is t=0 for all
-        time = np.zeros(nprt)
-    
-        #storage
-        r = np.zeros(nprt)
-        z = np.zeros(nprt)
-        phi = np.zeros(nprt)
-        zeta = np.zeros(nprt)
-        vr = np.zeros(nprt)
-        vz = np.zeros(nprt)
-        vphi = np.zeros(nprt)
-        pitch = np.zeros(nprt)
-        energy = np.zeros(nprt)
-
-        #uniform sampling
-        for i in range(nprt):
-            #toroidal angle (deg)
-            phi[i] = np.random.uniform(0.0,360.0)
-        
-            #gyroangle (rad)
-            zeta[i] = np.random.uniform(0.0,2.0*np.pi)
-
-            #pitch (vpar/vtot)
-            pitch[i] = np.random.uniform(pmin,pmax)
-        
-            #energy (eV); default is 1-100 keV
-            energy[i] = np.random.uniform(emin,emax)
-
-            #get random velocity vector
-            vtot = np.sqrt(2.0*energy[i]*q/(mass[i]*amu)) #m/s
-            vphi[i] = np.random.uniform(-1.0,1.0)
-            if (vphi[i] == 1) or (vphi[i] == -1):
-                vr[i] = 0
-                vz[i] = 0
-            else:
-                v2 = np.sqrt(1.0-vphi[i]**2)
-                vr[i] = np.random.uniform(-1.0*v2,v2)
-                if (vr[i] == v2) or (vr[i] == -1*v2):
-                    vz[i] = 0
-                else:
-                    vz[i] = np.sqrt(1.0-(vphi[i]**2 + vr[i]**2))
-
-            #unnormalize by vtot
-            vr[i] *= vtot #m/s
-            vz[i] *= vtot #m/s
-            vphi[i] *= vtot #m/s
-
-            #get random R and Z
-            rmin = 1.0
-            rmax = 2.0
-            zmin = -1
-            zmax = 1
-            r[i] = np.random.uniform(rmin,rmax) #m
-            z[i] = np.random.uniform(zmin,zmax) #m
-            
-            #print status
-            if (i+1)%1000==0:
-                print('Sampled '+str(i+1)+' particles')
-            
-        mystr = {
-            'n':nprt,
-            'ids':ids,
-            'r':r*u.m, #m
-            'phi':phi*u.degree, #deg
-            'z':z*u.m, #m
-            'pitch':pitch, #vpar/vtot
-            'weight':weight, #markers/s
-            'time':time*u.s, #s
-            'energy':energy*u.eV, #eV
-            'zeta':zeta*u.rad, #rad
-            'mass':mass*u.amu, #amu
-            'charge':charge*u.e, #e
-            'anum':anum,
-            'znum':znum}
-            #'vr':vr, #m/s
-            #'vphi':vphi, #m/s
-            #'vz':vz} #m/s
-
-        #print end
-        print('Marker initialization completed'+'\n')
-    
-        return mystr'''
