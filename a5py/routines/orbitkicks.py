@@ -259,7 +259,7 @@ class Orbitkicks():
 
             #run ended, get results
             print('Sub-simulation end'+'\n')
-            a5_out = Ascot("test_kicks.h5")
+            a5_out = a5io("test_kicks.h5")
             self._ascot = a5_out
             vrun = a5_out.data.active
 
@@ -599,7 +599,7 @@ class Orbitkicks():
         fnorm = abs(bcenter)
 
         #Normalized poloidal flux
-        psi_norm = (psi_f-psiaxis)/(psiwall psiaxis)
+        psi_norm = (psi_f-psiaxis)/(psiwall-psiaxis)
 
         #limit to within LCFS
         mask_lcfs = (psi_norm >= 0.0) & (psi_norm <= 1.0)
@@ -673,6 +673,10 @@ class Orbitkicks():
         outer = _make_branch(outer_mask,"outer")
         inner = _make_branch(inner_mask,"inner")
 
+        #innermost and outermost R
+        rlcfs_outer = float(np.nanmax(outer["r"]))
+        rlcfs_inner = float(np.nanmin(inner["r"]))
+
         #return structure
         bstr = {
             #Scalar quantities
@@ -707,6 +711,7 @@ class Orbitkicks():
             
             #outer midplane quantities for Pz construction
             "router": outer["r"],
+            "rlcfs_outer": rlcfs_outer,
             "bphiouter":outer["bphi"],
             "psiouter": outer["psi"]}
 
@@ -950,7 +955,7 @@ class Orbitkicks():
         bmax = bstr['bmax']/bcenter
         psiwall = bstr['psiwall']
         raxis = bstr['raxis']
-        rlcfs = bstr['rlcfs']
+        rlcfs = bstr['rlcfs_outer']
 
         #redefine mu range with buffer
         dum_mumax = 1.0/bmin*(mu_bins+1.0)/mu_bins
