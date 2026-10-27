@@ -247,7 +247,7 @@ class Orbitkicks():
             #self._ascot.simulation_initinputs()
             #vrun = self._ascot.simulation_run()
             #nmpi = int(os.environ.get("SLURM_NTASKS","32"))
-            nmpi=1
+            nmpi=10
             ascot_mpi_exe = "/u/pbonofig/ascot_dev/ascot5/build/ascot5_main"
             command=["mpirun","-np",str(nmpi),ascot_mpi_exe,"--in=test_kicks.h5"]
             try:
@@ -296,7 +296,7 @@ class Orbitkicks():
                                                                                                   "bnorm",
                                                                                                   "r",
                                                                                                   "z",
-                                                                                                  "pphi",
+                                                                                                  "ptor",
                                                                                                   ids=id_arr[j])
                 
                 #limit calculations to before marker is terminated
@@ -312,7 +312,9 @@ class Orbitkicks():
                 borb = borb[tind] #[T]
                 rorb = rorb[tind] #[m]
                 zorb = zorb[tind] #[m]
-                pzorb = pzorb[tind] #[amu*m/s]
+                pzorb = pzorb[tind] #[amu*m^2/s]
+                pzorb *= AMU #[kg*m^2/s]
+                pzorb /= (QE*bstr['psiwall']) #[unitless]
 
                 order = np.argsort(torb)
                 torb = torb[order]
@@ -325,7 +327,7 @@ class Orbitkicks():
                 borb = borb[order] #[T]
                 rorb = rorb[order] #[m]
                 zorb = zorb[order] #[m]
-                pzorb = pzorb[order] #[amu*m/s]
+                pzorb = pzorb[order] #[unitless]
 
                 psi_spl  = bstr["fpsi"].ev(rorb, zorb)
                 bphi_spl = bstr["fphi"].ev(rorb, zorb)
