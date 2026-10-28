@@ -60,8 +60,10 @@ class Orbitkicks():
 
     def __init__(self,ascot):
         self._ascot = ascot
+        self._h5file = ascot._inputfile
 
     def simkick(self,
+                ascot_mpi_exe=None,
                 gcmode=True,nprt=10000,nloop=5,
                 anum=2,znum=1,mrk=None,
                 nperiods=50,dtav=5e-7,
@@ -126,6 +128,9 @@ class Orbitkicks():
         """
         #needed for reading and writing to hdf5 file
         from a5py import Ascot as a5io
+
+        #get h5file name
+        h5file = self._h5file
         
         #check de_bins is odd for 0 center
         if de_bins % 2 == 0:
@@ -170,7 +175,7 @@ class Orbitkicks():
         #check for too short smoothing time
         if dtav > 0.3*dtsamp:
             raise ValueError('Smoothing time too long compared to dtsamp')
-
+            
         #print run information
         print('Simulation time: '+str(tsim)+'\n')
         print('Sampling time: '+str(dtsamp)+'\n')
@@ -193,13 +198,12 @@ class Orbitkicks():
                               ow_npoint=ow_npoint,gcmode=gcmode)
 
         #delete any old options present
-        with h5py.File("test_kicks.h5", "a") as f:
+        with h5py.File(h5file, "a") as f:
             if "options" in f:
                 del f["options"]
 
         #write new options
-        Opt.write_hdf5("test_kicks.h5",**opt)
-        #self._ascot.simulation_initoptions(**opt)
+        Opt.write_hdf5(h5file,**opt)
 
         #print rough storage for marker data (8 output variables below)
         mem = 8*nprt*ow_npoint*8/1e9
@@ -230,28 +234,22 @@ class Orbitkicks():
             #If marker is deleted but results is kept, a5py can later fail
             #while rebuilding the tree because old results reference missing
             #marker qids.
-            with h5py.File("test_kicks.h5", "a") as f:
+            with h5py.File(h5file, "a") as f:
                 for group in ["marker","results"]:
                     if group in f:
                         del f[group]
 
             #write markers
             if gcmode:
-                mgc.write_hdf5("test_kicks.h5",**mrk_loop)
+                mgc.write_hdf5(h5file,**mrk_loop)
             else:
-                mprt.write_hdf5("test_kicks.h5",**mrk_loop)
-            #self._ascot.simulation_initmarkers(**mrk_loop)
+                mprt.write_hdf5(h5file,**mrk_loop)
 
             #do simulation
             print('Sub-simulation start...'+'\n')
-            #self._ascot.simulation_initinputs()
-            #vrun = self._ascot.simulation_run()
-            #nmpi = int(os.environ.get("SLURM_NTASKS","32"))
-            nmpi=10
-            ascot_mpi_exe = "/u/pbonofig/ascot_dev/ascot5/build/ascot5_main"
-            command=["mpirun","-np",str(nmpi),ascot_mpi_exe,"--in=test_kicks.h5"]
+            nmpi = int(os.environ.get("SLURM_NTASKS","32"))
+            command=["mpirun","-np",str(nmpi),ascot_mpi_exe,f"--in={h5file}"]
             try:
-                #Capture the exact error output from mpirun
                 result = subprocess.run(command,check=True)
             except subprocess.CalledProcessError as e:
                 print("MPI FAILED WITH EXIT CODE:", e.returncode)
@@ -259,7 +257,7 @@ class Orbitkicks():
 
             #run ended, get results
             print('Sub-simulation end'+'\n')
-            a5_out = a5io("test_kicks.h5")
+            a5_out = a5io(h5file)
             self._ascot = a5_out
             vrun = a5_out.data.active
 
@@ -278,26 +276,27 @@ class Orbitkicks():
                                                 pz_min,pz_max,pz_bins,bstr)
 
             #needed for magnetic quantities
-            self._ascot.input_init(bfield=True)
+            #self._ascot.input_init(bfield=True)
 
             #print start
             print('Computing (DE,DP) kicks...'+'\n')
             
-            all_kicks = [] #kick storage 
+            #get orbit information
+            if gcmode:
+                orbout = self.read_orbit_h5_gc(h5file,anum=anum)
+            else:
+                orbout = self.read_orbit_h5_fo(h5file,anum=anum)
+
+            #loop through markers and calculate kicks
+            all_kicks = [] 
             for j in range(0,len(id_arr)):
-                #get orbit info vs. time
-                torb,eorb,muorb,wgtorb,pitorb,psiorb,bphiorb,borb,rorb,zorb,pzorb = vrun.getorbit("time",
-                                                                                                  "ekin",
-                                                                                                  "mu",
-                                                                                                  "weight",
-                                                                                                  "pitch",
-                                                                                                  "psi",
-                                                                                                  "bphi",
-                                                                                                  "bnorm",
-                                                                                                  "r",
-                                                                                                  "z",
-                                                                                                  "ptor",
-                                                                                                  ids=id_arr[j])
+                id_inds = np.where(orbout['ids'] == id_arr[j])[0]
+                torb = orbout['torb'][id_inds]
+                eorb = orbout['eorb'][id_inds]
+                muorb = orbout['muorb'][id_inds]
+                pitorb = orbout['pitorb'][id_inds]
+                rorb = orbout['rorb'][id_inds]
+                zorb = orbout['zorb'][id_inds]
                 
                 #limit calculations to before marker is terminated
                 tind = np.where(torb < t_fin[j])[0]
@@ -305,29 +304,17 @@ class Orbitkicks():
                 torb = torb[tind] #[s]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
-                wgtorb = wgtorb[tind] #[#/s]
                 pitorb = pitorb[tind] #[vpar/v]
-                psiorb = psiorb[tind] #[Wb]
-                bphiorb = bphiorb[tind] #[T]
-                borb = borb[tind] #[T]
                 rorb = rorb[tind] #[m]
                 zorb = zorb[tind] #[m]
-                pzorb = pzorb[tind] #[amu*m^2/s]
-                pzorb *= AMU #[kg*m^2/s]
-                pzorb /= (QE*bstr['psiwall']) #[unitless]
 
                 order = np.argsort(torb)
                 torb = torb[order]
                 eorb = eorb[order] #[eV]
                 muorb = muorb[order] #[eV/T]
-                wgtorb = wgtorb[order] #[#/s]
                 pitorb = pitorb[order] #[vpar/v]
-                psiorb = psiorb[order] #[Wb]
-                bphiorb = bphiorb[order] #[T]
-                borb = borb[order] #[T]
                 rorb = rorb[order] #[m]
                 zorb = zorb[order] #[m]
-                pzorb = pzorb[order] #[unitless]
 
                 psi_spl  = bstr["fpsi"].ev(rorb, zorb)
                 bphi_spl = bstr["fphi"].ev(rorb, zorb)
@@ -337,19 +324,15 @@ class Orbitkicks():
                     print("Skipping marker %s: fewer than 2 orbit samples"%id_arr[j])
                     continue
                 
-                #conver to Roscoe units
+                #conver to ORBIT units
                 eorb_keV = eorb/1.0e3 #[keV]
                 eorb_prime = self.energy_prime(eorb_keV,bstr,anum=anum,znum=znum)
-
                 muorb_norm = self.calc_mu_norm(muorb,eorb_keV,bstr)
-            
                 pzorb_norm = self.calc_pz_orbit(eprime=eorb_prime,
                                                 pitch=pitorb,
                                                 bnorm=btot_spl,
-                                                bphi=bphi_spl,
                                                 psi=psi_spl,
-                                                bstr=bstr,
-                                                rlocal=rorb)
+                                                bstr=bstr)
 
                 #sanity checks for completed marker data
                 if pzorb_norm.size == 0 or not np.any(np.isfinite(pzorb_norm)):
@@ -365,7 +348,7 @@ class Orbitkicks():
                 print(j,'a',eorb_keV)
                 print(j,'aa',eorb_prime)
                 print(j,'b',muorb_norm)
-                print(j,'cc',pzorb)
+                #print(j,'cc',pzorb)
                 print(j,'c',pzorb_norm)
                 #print(j,np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm),np.std(pzorb_norm))
                 print(j,'w',torb)
@@ -381,7 +364,7 @@ class Orbitkicks():
                 #can't record GC and GO positions simultaneously
                 if not gcmode:
                     gc = self.find_gc_equiv(torb,eorb_keV,pzorb_norm,muorb_norm,
-                                            borb,anum,znum)
+                                            btot_spl,anum,znum)
                     e_for_kick = gc["eorb_gc"]
                     pz_for_kick = gc["pzorb_gc"]
                     mu_for_kick = gc["muorb_gc"]
@@ -403,7 +386,7 @@ class Orbitkicks():
             print('Finished computing (DE,DP) kicks'+'\n')
             
             #free postproc bfield for next iteration loop
-            self._ascot.input_free()
+            #self._ascot.input_free()
 
             #check (DE,DPz) ranges only on first loop after kick calcs
             if pdedp_optimize == True:
@@ -415,15 +398,18 @@ class Orbitkicks():
             self.pdedp_record_kicks(pdedp,e_arr,pz_arr,mu_arr,de_arr,dpz_arr,
                                     all_kicks)
 
-            #free markers and diagnostics for next iteration
-            #self._ascot.simulation_free(markers=True,diagnostics=True)
-
             #print end of loop
             print('Completed iteration '+str(iloop+1)+'/'+str(nloop)+'\n')
 
         ################################################################
         #iteration loops have ended and we have finished all simulations
         ################################################################
+
+        #delete final markers and results to minimize disk/file space
+        with h5py.File(h5file, "a") as f:
+                for group in ["marker","results"]:
+                    if group in f:
+                        del f[group]
         
         #normalize matrix
         self.pdedp_finalize(pdedp,de_arr,dpz_arr)
@@ -438,6 +424,182 @@ class Orbitkicks():
                  'dtsamp':dtsamp}
         
         return mystr
+
+    def read_orbit_h5_gc(self,h5file,anum=2):
+        """
+        Parameters
+        ----------
+        h5file : string
+            h5file name
+        anum : int
+            Atomic mass number. Default is deuterium.
+        
+        Read guiding-center orbit diagnostics directly from HDF5 
+        and outputs needed orbit quantities for kick-model.
+        """
+        #open and read h5 file
+        with h5py.File(h5file,"r") as f:
+            #make sure it has results
+            if "results" not in f:
+                raise KeyError("No /results group found in HDF5 file.")
+
+            #use most recent run
+            run_name = list(f["results"].keys())[-1]
+
+            #get all orbit data
+            orbit = f["results"][run_name]["orbit"]
+        
+            #make sure needed quantities exist
+            required = ["ids","mileage","r","z","mu","ppar","br","bphi","bz"]
+            missing = [k for k in required if k not in orbit]
+            if len(missing) > 0:
+                raise KeyError(f"Missing orbit datasets {missing}. "
+                               f"Available keys are {list(orbit.keys())}")
+
+            #save needed orbit values
+            ids   = orbit["ids"][()]
+            torb  = orbit["mileage"][()]
+            rorb  = orbit["r"][()]
+            zorb  = orbit["z"][()]
+            muorb = orbit["mu"][()]
+            ppar  = orbit["ppar"][()]
+            br    = orbit["br"][()]
+            bphi  = orbit["bphi"][()]
+            bz    = orbit["bz"][()]
+
+        #Convert to arrays
+        ids   = np.asarray(ids,dtype=int)
+        torb  = np.asarray(torb,dtype=float)
+        rorb  = np.asarray(rorb,dtype=float)
+        zorb  = np.asarray(zorb,dtype=float)
+        muorb = np.asarray(muorb,dtype=float)
+        ppar  = np.asarray(ppar,dtype=float)
+        br    = np.asarray(br,dtype=float)
+        bphi  = np.asarray(bphi,dtype=float)
+        bz    = np.asarray(bz,dtype=float)
+
+        #total b-field
+        borb = np.sqrt(br**2 + bphi**2 + bz**2)
+
+        #Reconstruct kinetic energy
+        #E_perp = mu*B
+        #E_par = ppar^2/(2*m*q)
+        #pitch = vpar/v = sign(ppar)*sqrt(E_par/E)
+        mass_kg = anum*MP
+        epar_eV = ppar**2/(2.0*mass_kg*QE)
+        eperp_eV = muorb*borb
+        eorb_eV = epar_eV + eperp_eV
+
+        #reconstruct pitch
+        pitch = np.sign(ppar)*np.sqrt(epar_eV/eorb_eV)
+        pitch = np.clip(pitch,-1.0,1.0)
+
+        #Sort by marker id, then time
+        order = np.lexsort((torb,ids))
+
+        orbit_data = {
+            "ids":ids[order],
+            "torb":torb[order],
+            "rorb":rorb[order],
+            "zorb":zorb[order],
+            "muorb":muorb[order],
+            "eorb":eorb_eV[order],
+            "pitorb":pitch[order]}
+
+        return orbit_data
+
+    def read_orbit_h5_fo(self,h5file,anum=2):
+        """
+        Parameters
+        ----------
+        h5file : string
+            h5file name
+        anum : int
+            Atomic mass number. Default is deuterium.
+        
+        Read full-orbit orbit diagnostics directly from HDF5 
+        and outputs needed orbit quantities for kick-model.
+        """
+        #open and read h5 file
+        with h5py.File(h5file,"r") as f:
+            #make sure it has results
+            if "results" not in f:
+                raise KeyError("No /results group found in HDF5 file.")
+
+            #use most recent run
+            run_name = list(f["results"].keys())[-1]
+
+            #get all orbit data
+            orbit = f["results"][run_name]["orbit"]
+        
+            #make sure needed quantities exist
+            required = ["ids","mileage","r","z","pr","pphi","pz","br","bphi","bz"]
+            missing = [k for k in required if k not in orbit]
+            if len(missing) > 0:
+                raise KeyError(f"Missing orbit datasets {missing}. "
+                               f"Available keys are {list(orbit.keys())}")
+
+            #save needed orbit values
+            ids   = orbit["ids"][()]
+            torb  = orbit["mileage"][()]
+            rorb  = orbit["r"][()]
+            zorb  = orbit["z"][()]
+            pr  = orbit["pr"][()]
+            pphi  = orbit["pphi"][()]
+            pz  = orbit["pz"][()]
+            br    = orbit["br"][()]
+            bphi  = orbit["bphi"][()]
+            bz    = orbit["bz"][()]
+
+        #Convert to arrays
+        ids   = np.asarray(ids,dtype=int)
+        torb  = np.asarray(torb,dtype=float)
+        rorb  = np.asarray(rorb,dtype=float)
+        zorb  = np.asarray(zorb,dtype=float)
+        pr  = np.asarray(pr,dtype=float)
+        pphi  = np.asarray(pphi,dtype=float)
+        pz  = np.asarray(pz,dtype=float)
+        br    = np.asarray(br,dtype=float)
+        bphi  = np.asarray(bphi,dtype=float)
+        bz    = np.asarray(bz,dtype=float)
+
+        #total b-field
+        borb = np.sqrt(br**2 + bphi**2 + bz**2)
+
+        #total momentum 
+        pmag = np.sqrt(pr**2 + pphi**2 + pz**2)
+
+        #Reconstruct kinetic energy
+        #E = p^2/2m
+        mass_kg = anum*MP
+        eorb_eV = (pmag**2/(2.0*mass_kg))/QE
+
+        #Find pitch from parallel momentum
+        bhat_r = br/borb
+        bhat_phi = bphi/borb
+        bhat_z = bz/borb
+        ppar = pr*bhat_r + pphi*bhat_phi + pz*bhat_z
+        pitch = ppar/pmag
+        pitch = np.clip(pitch,-1.0,1.0)
+
+        #Magnetic moment in eV/T
+        pperp2 = pmag**2 - ppar**2
+        eperp_J = pperp2/(2.0*mass_kg)
+        muorb = (eperp_J/QE)/borb
+
+        #Sort by marker id, then time
+        order = np.lexsort((torb,ids))
+
+        orbit_data = {
+            "ids":ids[order],
+            "torb":torb[order],
+            "rorb":rorb[order],
+            "zorb":zorb[order],
+            "muorb":muorb[order],
+            "eorb":eorb_eV[order],
+            "pitorb":pitch[order]}
+
+        return orbit_data
 
     def set_simkick_opts(self,opt,tsim=0.0002,
                          ow_int=1e-8,ow_npoint=30000,
@@ -703,8 +865,8 @@ class Orbitkicks():
             #Spline evaluators
             "ftot": ftot,
             "fphi": fphi,
-            "fphi": fr,
-            "fphi": fz,
+            "fr": fr,
+            "fz": fz,
             "fpsi": fpsi,
 
             #Branches for R(psi) on midplane
@@ -716,6 +878,28 @@ class Orbitkicks():
             "rlcfs_outer": rlcfs_outer,
             "bphiouter":outer["bphi"],
             "psiouter": outer["psi"]}
+
+        #order  outer quantities by psi
+        psiouter = np.asarray(bstr["psiouter"], dtype=float)
+        router = np.asarray(bstr["router"], dtype=float)
+        bphiouter = np.asarray(bstr["bphiouter"], dtype=float)
+        order = np.argsort(psiouter)
+        psiouter = psiouter[order]
+        router = router[order]
+        bphiouter = bphiouter[order]
+
+        #make g-function
+        gouter = router*bphiouter/fnorm
+
+        #update structure
+        bstr["psiouter"] = psiouter
+        bstr["router"] = router
+        bstr["bphiouter"] = bphiouter
+        bstr["gouter"] = gouter
+
+        #for Pz_orbit calculation
+        bstr["psi_lcfs_rel"] = psiwall - psiaxis
+        bstr["psi_w"] = (psiwall - psiaxis)/fnorm
 
         return bstr
 
@@ -825,7 +1009,7 @@ class Orbitkicks():
 
          return mu_eVT*b0/energy_eV
 
-    def calc_pz_orbit(self,eprime,pitch,bnorm,bphi,psi,bstr,rlocal):
+    def calc_pz_orbit(self,eprime,pitch,bnorm,psi,bstr):
         """
         Parameters
          ----------
@@ -839,8 +1023,6 @@ class Orbitkicks():
             Local poloidal flux orbit values
          bstr : dictionary
             Magnetic field structure from get_kick_bfield()
-         rlocal : float array [m]
-            Major radius orbit values
 
         Compute ORBIT-normalized canonical toroidal momentum Pz.
 
@@ -858,46 +1040,26 @@ class Orbitkicks():
         eprime = np.asarray(eprime,dtype=float)
         pitch = np.asarray(pitch,dtype=float)
         bnorm = np.asarray(bnorm,dtype=float)
-        bphi = np.asarray(bphi,dtype=float)
         psi = np.asarray(psi,dtype=float)
-        rlocal = np.asarray(rlocal,dtype=float)
 
         #magnetic field quantities
-        b0 = float(bstr["bcenter"])
-        r0 = float(bstr["raxis"])
         fnorm = float(bstr["fnorm"])
         psi_axis = float(bstr["psiaxis"])
-        psi_lcfs = float(bstr["psiwall"])
-       
-        #Normalize flux and 0 on axis
-        psi_rel = psi - psi_axis
-        psi_lcfs_rel = psi_lcfs - psi_axis
-
-        #ORBIT relation: Psi_lcfs = Psi_w * fnorm
-        psi_w = psi_lcfs_rel / fnorm
+        psi_lcfs_rel = bstr["psi_lcfs_rel"]
+        psi_w = bstr["psi_w"] #ORBIT relation: Psi_lcfs = Psi_w * fnorm
 
         #Quantities needed on outer midplane
-        router = np.asarray(bstr["router"], dtype=float)
         psiouter = np.asarray(bstr["psiouter"], dtype=float)
-        bphiouter = np.asarray(bstr["bphiouter"], dtype=float)
+        gouter = np.asarray(bstr["gouter"], dtype=float)
 
-        #g-function on outer midplane
-        gouter = router*bphiouter/fnorm
-
-        #Ensure interpolation arrays are monotonically ordered
-        order = np.argsort(psiouter)
-        r_mid = np.interp(psi,psiouter[order],router[order],left=np.nan,right=np.nan)
-        bphi_mid = np.interp(psi,psiouter[order],bphiouter[order],left=np.nan,right=np.nan)
-        g_mid = np.interp(psi,psiouter[order],gouter[order],left=np.nan,right=np.nan)
-
-        #g-function
-        g = r_mid*bphi_mid/fnorm
+        #interpolate g-function
+        g = np.interp(psi,psiouter,gouter,left=np.nan,right=np.nan)
 
         #rho_parallel
         rho_parallel = pitch*np.sqrt(2.0*eprime)*fnorm/bnorm
 
         #normalized flux term
-        psi_norm = psi_rel/psi_lcfs_rel
+        psi_norm = (psi-psi_axis)/psi_lcfs_rel
 
         pz = -rho_parallel*g/psi_w - psi_norm
 
@@ -1591,81 +1753,71 @@ class Orbitkicks():
 
         #have a small offset before building kicks
         tstart = t[0] + 0.2*dtsamp
+        tstop = t[-1] - dtsamp - dtav
+        starts = np.arange(tstart,tstop,dtsamp)
 
-        #storage
-        eavgs = []
-        pzavgs = []
-        muavgs = []
-        dekicks = []
-        dpzkicks = []
-        wgts = []
+        #too short in time, return empty kicks
+        if tstop <= tstart:
+            return self.empty_kick_dict(), maxDE_kick, maxDPz_kick
 
-        #start times for each sample
-        starts = np.arange(tstart,t[-1]-dtsamp-dtav,dtsamp)
+        #sample start window
+        i0 = np.searchsorted(t,starts)
+        i1 = np.searchsorted(t,starts + dtav)
 
-        #loop through orbit and calculate samples
-        for ts in starts:
-            #sample start window
-            i0 = np.searchsorted(t,ts)
-            i1 = np.searchsorted(t,ts + dtav)
+        #sample end window
+        j0 = np.searchsorted(t,starts + dtsamp)
+        j1 = np.searchsorted(t,starts + dtsamp + dtav)
 
-            #sample end window
-            j0 = np.searchsorted(t,ts + dtsamp)
-            j1 = np.searchsorted(t,ts + dtsamp + dtav)
+        # Keep windows with at least one point in both start and end windows.
+        good = ((i1 > i0) & (j1 > j0) & (i0 >= 0) & (j0 >= 0)
+                & (i1 <= len(t)) & (j1 <= len(t)))
+        i0 = i0[good]
+        i1 = i1[good]
+        j0 = j0[good]
+        j1 = j1[good]
 
-            if i1 <= i0 or j1 <= j0 or j1 > len(t):
-                continue
+        #make sure window is not empty
+        if len(i0) == 0:
+            return self.empty_kick_dict(), maxDE_kick, maxDPz_kick
 
-            #start window values
-            e0 = np.mean(e[i0:i1])
-            p0 = np.mean(pz[i0:i1])
-            mu0 = np.mean(mu[i0:i1])
+        # Calc means over intervals [a:b] = (cs[b] - cs[a])/(b-a)
+        # Cumulative sums for fast interval means
+        cse = np.concatenate(([0.0],np.cumsum(e)))
+        csp = np.concatenate(([0.0],np.cumsum(pz)))
+        csm = np.concatenate(([0.0],np.cumsum(mu)))
+        n0 = i1 - i0
+        n1 = j1 - j0
 
-            #end window values
-            e1 = np.mean(e[j0:j1])
-            p1 = np.mean(pz[j0:j1])
-            mu1 = np.mean(mu[j0:j1])
+        #start window values
+        e0 = (cse[i1] - cse[i0])/n0
+        p0 = (csp[i1] - csp[i0])/n0
+        mu0 = (csm[i1] - csm[i0])/n0
 
-            #calculated kicks
-            de = e1 - e0         
-            dp = p1 - p0         
-            dmu = mu1 - mu0
-            print('test kick',dp,p1,p0)
+        #end window values
+        e1 = (cse[j1] - cse[j0])/n1
+        p1 = (csp[j1] - csp[j0])/n1
+        mu1 = (csm[j1] - csm[j0])/n1
+        
+        #calculated kicks
+        de = e1 - e0         
+        dp = p1 - p0         
+        dmu = mu1 - mu0
             
-            #potential diagnostic for mu conservation
-            #if abs(dmu) > mutol:
-                #do something
+        #potential diagnostic for mu conservation
+        #if abs(dmu) > mutol:
+        #do something
 
-            #DEBUGGING
-            if abs(dp) > 0.3:
-                print("\nLarge DPz kick detected")
-                print(f"  dpz    = {dp:.6e}")
-                print(f"  pz0    = {p0:.6e}")
-                print(f"  pz1    = {p1:.6e}")
-                print(f"  e0     = {e0:.6e} keV")
-                print(f"  e1     = {e1:.6e} keV")
-                print(f"  de     = {de:.6e} keV")
-                print(f"  mu0    = {mu0:.6e}")
-                print(f"  ts     = {ts:.6e}")
-                print(f"  dtsamp = {dtsamp:.6e}")
-                print(f"  dtav   = {dtav:.6e}")
-                print(f"  nwin0  = {i1 - i0}")
-                print(f"  nwin1  = {j1 - j0}")
+        #DEBUGGING
+        print('test kick',dp,p1,p0)
+        if abs(np.mean(dp)) > 0.3:
+            print("\nLarge DPz kick detected")
 
-            #update max kick values if found
-            maxDE_kick = max(maxDE_kick,1.05*abs(de))
-            maxDPz_kick = max(maxDPz_kick,1.05*abs(dp))
+        #update max kick values if found
+        maxDE_kick = max(maxDE_kick,1.05*np.nanmax(abs(de)))
+        maxDPz_kick = max(maxDPz_kick,1.05*np.nanmax(abs(dp)))
 
-            #append values to storage
-            eavgs.append(e0)
-            pzavgs.append(p0)
-            muavgs.append(mu0)
-            dekicks.append(de)
-            dpzkicks.append(dp)
-            wgts.append(1.0) #use unit weight unless doing importance sampling
-
-        kick_calc_str = {'eavgs':eavgs,'pzavgs':pzavgs,'muavgs':muavgs,
-                         'dekicks':dekicks,'dpzkicks':dpzkicks,'wgts':wgts}
+        kick_calc_str = {'eavgs':e0,'pzavgs':p0,'muavgs':mu0,
+                         'dekicks':de,'dpzkicks':dp,'wgts':np.ones_like(de)}
         
         return kick_calc_str,maxDE_kick,maxDPz_kick
 
@@ -1855,15 +2007,16 @@ class Orbitkicks():
                 "time":time*u.s}
         else:
             #local magnetic field
-            br = np.asarray(bstr["fbr"].ev(r, z),dtype=float)
+            br = np.asarray(bstr["fr"].ev(r, z),dtype=float)
             bphi = np.asarray(bstr["fphi"].ev(r, z),dtype=float)
-            bz = np.asarray(bstr["fbz"].ev(r, z),dtype=float)
+            bz = np.asarray(bstr["fz"].ev(r, z),dtype=float)
             bnorm = np.sqrt(br**2+bz**2+bphi**2)
 
             #magnetic field unit vector
             bhat_r = br/bnorm
             bhat_phi = bphi/bnorm
             bhat_z = bz/bnorm
+            bvec = np.column_stack((bhat_r,bhat_phi,bhat_z))
 
             #Velocity components
             vtot = np.sqrt(2.0*energy_eV*QE/(mass_amu*AMU))
@@ -1876,10 +2029,10 @@ class Orbitkicks():
             refvec = np.zeros_like(bvec)
             refvec[:,2] = 1.0
             nearly_zhat = np.abs(bhat_z) > 0.95
-            ref[nearly_zhat,:] = np.array([1.0,0.0,0.0])
+            refvec[nearly_zhat,:] = np.array([1.0,0.0,0.0])
 
             #first unit vector of perpendicular basis
-            e1 = np.cross(bvec,ref)
+            e1 = np.cross(bvec,refvec)
             e1norm = np.linalg.norm(e1,axis=1)
             e1 = e1/e1norm[:,None]
 
