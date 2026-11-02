@@ -7,6 +7,8 @@ fmode << fgyro)
 import os
 import h5py
 import subprocess
+import shutil
+import gc as py_gc
 import numpy as np
 import unyt as u
 
@@ -58,9 +60,39 @@ class Orbitkicks():
         Ascot objecct used to run Orbitkicks
     """
 
-    def __init__(self,ascot):
+    def __init__(self,ascot,h5file=None):
         self._ascot = ascot
-        self._h5file = ascot._inputfile
+
+        if h5file is not None:
+            self._h5file = h5file
+        elif hasattr(ascot,"_inputfile") and ascot._inputfile is not None:
+            self._h5file = ascot._inputfile
+        else:
+            self._h5file = None
+
+        #storage for simkick results
+        self.e_arr = None
+        self.mu_arr = None
+        self.pz_arr = None
+        self.de_arr = None
+        self.dpz_arr = None
+        self.pdedp = None
+        self.dtsamp = None
+
+    def get_h5file(self):
+        """
+        Return the ASCOT HDF5 filename used by this Orbitkicks object.
+        """
+        if self._h5file is not None:
+            return self._h5file
+
+        if hasattr(self._ascot,"_inputfile") and self._ascot._inputfile is not None:
+            self._h5file = self._ascot._inputfile
+            return self._h5file
+
+        raise ValueError(
+            "Could not determine ASCOT HDF5 filename."
+            "Pass h5file explicitly to Orbitkicks(ascot,h5file=...).")
 
     def simkick(self,
                 ascot_mpi_exe=None,
@@ -129,8 +161,15 @@ class Orbitkicks():
         #needed for reading and writing to hdf5 file
         from a5py import Ascot as a5io
 
-        #get h5file name
-        h5file = self._h5file
+        #get h5file name and set with absolute path
+        h5file = os.path.abspath(self.get_h5file())
+        self._h5file = h5file
+        base_h5file = self.get_h5file()
+        base_dir = os.path.dirname(base_h5file)
+
+        #make sure executable is supplied
+        if ascot_mpi_exe is None:
+            raise ValueError("path for ascot_mpi_exe must be supplied")
         
         #check de_bins is odd for 0 center
         if de_bins % 2 == 0:
@@ -151,11 +190,6 @@ class Orbitkicks():
         maxDE_kick = 0.0
         maxDPz_kick = 0.0
 
-        #print kick storage memory size, float=8 bytes
-        mem1 = 8*(e_bins+pz_bins+mu_bins+de_bins+dpz_bins)/1e9
-        mem2 = 8*e_bins*pz_bins*mu_bins*de_bins*dpz_bins/1e9
-        print('Rough memory usage for kick storage: '+str(mem1+mem2)+' GB'+'\n')
-
         #get mode frequency
         mhd = self._ascot.data.mhd.active.read()
         omega = np.asarray(mhd["omega"],dtype=float).ravel() #rad/s
@@ -175,39 +209,52 @@ class Orbitkicks():
         #check for too short smoothing time
         if dtav > 0.3*dtsamp:
             raise ValueError('Smoothing time too long compared to dtsamp')
-            
-        #print run information
-        print('Simulation time: '+str(tsim)+'\n')
-        print('Sampling time: '+str(dtsamp)+'\n')
-        print('Mode period: '+str(mode_period)+'\n')
-        print('Total markers: '+str(nprt*nloop)+'\n')
-        if gcmode:
-            print('Guiding-center simulation'+'\n')
-        else:
-            print('Full orbit simulation'+'\n')
 
         #set orbitwrite interval to have sufficient averaging
         ow_int = min(dtav/10.0,dtsamp/20.0)
 
         #get number of orbitwrite npoints from orbitwrite interval
         ow_npoint = int(np.ceil(1.2*tsim/ow_int))+10
+
+        #print run information
+        print('Simulation time: '+str(tsim)+'\n')
+        print('Sampling time: '+str(dtsamp)+'\n')
+        print('Mode period: '+str(mode_period)+'\n')
+        print('High Freq. avg. period: '+str(dtav)+'\n')
+        print('Orbitwrite interval: '+str(ow_int)+'\n')
+        print('Orbitwrite npoints: '+str(ow_npoint)+'\n')
+        print('Total markers: '+str(nprt*nloop)+'\n')
+        if gcmode:
+            print('Guiding-center simulation'+'\n')
+        else:
+            print('Full orbit simulation'+'\n')
+
+        #print rough storage for marker data
+        n_orbit_fields = 16
+        mem = 8*nprt*ow_npoint*n_orbit_fields/1e9
+        print('Rough memory usage for marker data: '+str(mem)+' GB'+'\n')
+
+        #print kick storage memory size, float=8 bytes
+        mem1 = 8*(e_bins+pz_bins+mu_bins+de_bins+dpz_bins)/1e9
+        mem2 = 8*e_bins*pz_bins*mu_bins*de_bins*dpz_bins/1e9
+        print('Rough memory usage for kick storage: '+str(mem1+mem2)+' GB'+'\n')
         
         #make run options
         opt = Opt.get_default()
         self.set_simkick_opts(opt,tsim=tsim,ow_int=ow_int,
                               ow_npoint=ow_npoint,gcmode=gcmode)
 
-        #delete any old options present
-        with h5py.File(h5file, "a") as f:
-            if "options" in f:
-                del f["options"]
+        #delete any old options, markers, and results
+        with h5py.File(base_h5file, "a") as f:
+            for group in ["options","marker","results"]:
+                if group in f:
+                    del f[group]
 
         #write new options
-        Opt.write_hdf5(h5file,**opt)
+        Opt.write_hdf5(base_h5file,**opt)
 
-        #print rough storage for marker data (8 output variables below)
-        mem = 8*nprt*ow_npoint*8/1e9
-        print('Rough memory usage for marker data: '+str(mem)+' GB'+'\n')
+        #get needed bfield quantities for marker init and unit norms
+        bstr = self.get_kick_bfield()
 
         #loop over sub-simulations and calculate kicks
         for iloop in range(0,nloop):
@@ -217,57 +264,54 @@ class Orbitkicks():
             #only optimize first loop to avoid over interpolation of kicks
             if iloop > 0:
                 pdedp_optimize = False
-
-            #get needed bfield quantities for marker init and unit norms
-            bstr = self.get_kick_bfield()
         
             #initialize markers
             if mrk is None:
-                mrk_loop = self.uni_mrk_orbit_deposit(bstr,emin_keV=e_min_keV,emax_keV=e_max_keV,
-                                                      anum=anum,znum=znum,nprt=nprt,gcmode=gcmode)
+                mrk_loop = self.uni_mrk_orbit_deposit(bstr,
+                                                      emin_keV=e_min_keV,
+                                                      emax_keV=e_max_keV,
+                                                      anum=anum,znum=znum,
+                                                      nprt=nprt,gcmode=gcmode)
             else:
                 mrk_loop = mrk
 
-            #Remove old markers and results before this sub-run
-            #This prevents ASCOT from using stale active marker/result groups.
-            #Results groups store qids pointing to marker groups.
-            #If marker is deleted but results is kept, a5py can later fail
-            #while rebuilding the tree because old results reference missing
-            #marker qids.
-            with h5py.File(h5file, "a") as f:
-                for group in ["marker","results"]:
-                    if group in f:
-                        del f[group]
+            #copy clean base file to loop-specific file.
+            loop_h5file = os.path.join(base_dir,
+                                       f"orbitkick_loop_{iloop+1:04d}.h5")
+            shutil.copy2(base_h5file,loop_h5file)
 
             #write markers
             if gcmode:
-                mgc.write_hdf5(h5file,**mrk_loop)
+                mgc.write_hdf5(loop_h5file,**mrk_loop)
             else:
-                mprt.write_hdf5(h5file,**mrk_loop)
+                mprt.write_hdf5(loop_h5file,**mrk_loop)
 
             #do simulation
             print('Sub-simulation start...'+'\n')
-            nmpi = int(os.environ.get("SLURM_NTASKS","32"))
-            command=["mpirun","-np",str(nmpi),ascot_mpi_exe,f"--in={h5file}"]
+            nmpi = int(os.environ.get("SLURM_NTASKS","1"))
+            command=["mpirun","-np",str(nmpi),ascot_mpi_exe,f"--in={loop_h5file}"]
             try:
-                result = subprocess.run(command,check=True)
+                result = subprocess.run(command,check=True,cwd=base_dir,
+                                        capture_output=True,text=True)
             except subprocess.CalledProcessError as e:
-                print("MPI FAILED WITH EXIT CODE:", e.returncode)
+                print("MPI FAILED WITH EXIT CODE:", e.returncode,flush=True)
+                print(e.stdout,flush=True)
+                print(e.stderr,flush=True)
                 raise
 
             #run ended, get results
             print('Sub-simulation end'+'\n')
-            a5_out = a5io(h5file)
+            a5_out = a5io(loop_h5file)
             self._ascot = a5_out
             vrun = a5_out.data.active
 
             #sanity check that run completed
             if vrun is None:
-                raise RuntimeError("No active ASCOT result found!.")
+                raise RuntimeError("No active ASCOT result found!")
 
             #get marker ids and lost times
-            id_arr = vrun.getstate("ids", state="ini") #particle IDs
-            t_fin = vrun.getstate("time", state="end") #end time [s]
+            id_arr = vrun.getstate("ids",state="ini") #particle IDs
+            t_fin = vrun.getstate("time",state="end") #end time [s]
 
             #check kick ranges based on inputs only on first loop
             if pdedp_optimize == True:
@@ -275,38 +319,46 @@ class Orbitkicks():
                                                 mu_min,mu_max,mu_bins,
                                                 pz_min,pz_max,pz_bins,bstr)
 
-            #needed for magnetic quantities
-            #self._ascot.input_init(bfield=True)
-
             #print start
             print('Computing (DE,DP) kicks...'+'\n')
             
             #get orbit information
             if gcmode:
-                orbout = self.read_orbit_h5_gc(h5file,anum=anum)
+                orbout = self.read_orbit_h5_gc(loop_h5file,anum=anum)
             else:
-                orbout = self.read_orbit_h5_fo(h5file,anum=anum)
+                orbout = self.read_orbit_h5_fo(loop_h5file,anum=anum)
+
+            #find marker id start and stop ranges from orbout
+            ids_all = np.asarray(orbout["ids"],dtype=int)
+            unique_ids, starts = np.unique(ids_all,return_index=True)
+            stops = np.r_[starts[1:],len(ids_all)]
+
+            #look up table from ID to final time
+            t_fin_by_id = dict(zip(np.asarray(id_arr,dtype=int),
+                                   np.asarray(t_fin,dtype=float)))
 
             #loop through markers and calculate kicks
-            all_kicks = [] 
-            for j in range(0,len(id_arr)):
-                id_inds = np.where(orbout['ids'] == id_arr[j])[0]
-                torb = orbout['torb'][id_inds]
-                eorb = orbout['eorb'][id_inds]
-                muorb = orbout['muorb'][id_inds]
-                pitorb = orbout['pitorb'][id_inds]
-                rorb = orbout['rorb'][id_inds]
-                zorb = orbout['zorb'][id_inds]
+            all_kicks = []
+            for j, mid in enumerate(unique_ids):
+                sl = slice(starts[j],stops[j])
+                torb = orbout['torb'][sl]
+                eorb = orbout['eorb'][sl]
+                muorb = orbout['muorb'][sl]
+                pitorb = orbout['pitorb'][sl]
+                rorb = orbout['rorb'][sl]
+                zorb = orbout['zorb'][sl]
+                borb = orbout['borb'][sl]
                 
                 #limit calculations to before marker is terminated
-                tind = np.where(torb < t_fin[j])[0]
-                #tind = tind[1:]
+                tfinal = t_fin_by_id.get(int(mid),np.inf)
+                tind = np.where(torb < tfinal)[0]
                 torb = torb[tind] #[s]
                 eorb = eorb[tind] #[eV]
                 muorb = muorb[tind] #[eV/T]
                 pitorb = pitorb[tind] #[vpar/v]
                 rorb = rorb[tind] #[m]
                 zorb = zorb[tind] #[m]
+                borb = borb[tind] #[T]
 
                 order = np.argsort(torb)
                 torb = torb[order]
@@ -315,13 +367,14 @@ class Orbitkicks():
                 pitorb = pitorb[order] #[vpar/v]
                 rorb = rorb[order] #[m]
                 zorb = zorb[order] #[m]
+                borb = borb[order] #[T]
 
                 psi_spl  = bstr["fpsi"].ev(rorb, zorb)
-                bphi_spl = bstr["fphi"].ev(rorb, zorb)
                 btot_spl = bstr["ftot"].ev(rorb, zorb)
+                #btot_spl = borb
 
                 if len(torb) < 2:
-                    print("Skipping marker %s: fewer than 2 orbit samples"%id_arr[j])
+                    print("Skipping marker %s: fewer than 2 orbit samples"%mid)
                     continue
                 
                 #conver to ORBIT units
@@ -336,29 +389,31 @@ class Orbitkicks():
 
                 #sanity checks for completed marker data
                 if pzorb_norm.size == 0 or not np.any(np.isfinite(pzorb_norm)):
-                    print("Skipping marker %s: empty/non-finite Pz orbit "%id_arr[j])
+                    print("Skipping marker %s: empty/non-finite Pz orbit "%mid)
                     continue
                 if eorb_keV.size == 0 or not np.any(np.isfinite(eorb_keV)):
-                    print("Skipping marker %s: empty/non-finite Ekev orbit "%id_arr[j])
+                    print("Skipping marker %s: empty/non-finite Ekev orbit "%mid)
                     continue
                 if muorb_norm.size == 0 or not np.any(np.isfinite(muorb_norm)):
-                    print("Skipping marker %s: empty/non-finite mu orbit "%id_arr[j])
+                    print("Skipping marker %s: empty/non-finite mu orbit "%mid)
                     continue
-                
-                print(j,'a',eorb_keV)
-                print(j,'aa',eorb_prime)
-                print(j,'b',muorb_norm)
-                #print(j,'cc',pzorb)
-                print(j,'c',pzorb_norm)
-                #print(j,np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm),np.std(pzorb_norm))
-                print(j,'w',torb)
-                #print(j,'e',pzdum)
-                if pzorb_norm.size != 0:
-                    print(j,"Pz range:", np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm))
-                    print(j,"Pz std:", np.std(pzorb_norm))
-                    print(j,"Pz start/end:", pzorb_norm[0], pzorb_norm[-1],
-                          "difference:", pzorb_norm[-1] - pzorb_norm[0])
-                    print(j, "mu_norm:", np.nanmean(muorb_norm))
+
+                #DEBUGGING
+                if j%100 == 0:
+                    print(j,'a',eorb_keV)
+                    print(j,'aa',eorb_prime)
+                    print(j,'b',muorb_norm)
+                    #print(j,'cc',pzorb)
+                    print(j,'c',pzorb_norm)
+                    #print(j,np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm),np.std(pzorb_norm))
+                    print(j,'w',torb)
+                    #print(j,'e',pzdum)
+                    if pzorb_norm.size != 0:
+                        print(j,"Pz range:", np.nanmax(pzorb_norm)-np.nanmin(pzorb_norm))
+                        print(j,"Pz std:", np.std(pzorb_norm))
+                        print(j,"Pz start/end:", pzorb_norm[0], pzorb_norm[-1],
+                              "difference:", pzorb_norm[-1] - pzorb_norm[0])
+                        print(j, "mu_norm:", np.nanmean(muorb_norm))
                 
                 #average full-orbit over gyroperiod
                 #can't record GC and GO positions simultaneously
@@ -384,9 +439,6 @@ class Orbitkicks():
 
             #loop through markers has ended
             print('Finished computing (DE,DP) kicks'+'\n')
-            
-            #free postproc bfield for next iteration loop
-            #self._ascot.input_free()
 
             #check (DE,DPz) ranges only on first loop after kick calcs
             if pdedp_optimize == True:
@@ -401,15 +453,16 @@ class Orbitkicks():
             #print end of loop
             print('Completed iteration '+str(iloop+1)+'/'+str(nloop)+'\n')
 
+            #wipe loop data structures
+            del vrun
+            del a5_out
+            self._ascot = a5io(base_h5file) #restore self._ascot to base file
+            py_gc.collect()
+            os.remove(loop_h5file)
+
         ################################################################
         #iteration loops have ended and we have finished all simulations
         ################################################################
-
-        #delete final markers and results to minimize disk/file space
-        with h5py.File(h5file, "a") as f:
-                for group in ["marker","results"]:
-                    if group in f:
-                        del f[group]
         
         #normalize matrix
         self.pdedp_finalize(pdedp,de_arr,dpz_arr)
@@ -417,6 +470,15 @@ class Orbitkicks():
         #write ufile
         self.write_pdedp_ufile(dtsamp,e_arr,mu_arr,pz_arr,de_arr,dpz_arr,
                                pdedp,ami=anum,zmi=znum)
+
+        #save to class object
+        self.e_arr = e_arr
+        self.mu_arr = mu_arr
+        self.pz_arr = pz_arr
+        self.de_arr = de_arr
+        self.dpz_arr = dpz_arr
+        self.pdedp = pdedp
+        self.dtsamp = dtsamp
 
         #output structure if using routine interactively
         mystr = {'e_arr':e_arr,'mu_arr':mu_arr,'pz_arr':pz_arr,
@@ -504,7 +566,8 @@ class Orbitkicks():
             "zorb":zorb[order],
             "muorb":muorb[order],
             "eorb":eorb_eV[order],
-            "pitorb":pitch[order]}
+            "pitorb":pitch[order],
+            "borb":borb[order]}
 
         return orbit_data
 
@@ -597,7 +660,8 @@ class Orbitkicks():
             "zorb":zorb[order],
             "muorb":muorb[order],
             "eorb":eorb_eV[order],
-            "pitorb":pitch[order]}
+            "pitorb":pitch[order],
+            "borb":borb[order]}
 
         return orbit_data
 
@@ -633,9 +697,9 @@ class Orbitkicks():
             "SIM_MODE":sim_mode,
             "ENABLE_ADAPTIVE":0,
             "RECORD_MODE":rec_mode,
-            "FIXEDSTEP_USE_USERDEFINED":0,
-            "FIXEDSTEP_USERDEFINED":1e-9,
-            "FIXEDSTEP_GYRODEFINED":10,
+            "FIXEDSTEP_USE_USERDEFINED":1,
+            "FIXEDSTEP_USERDEFINED":1e-10,
+            "FIXEDSTEP_GYRODEFINED":20,
             "ENDCOND_SIMTIMELIM":1, #end at max mileage
             "ENDCOND_RHOLIM":1, #end at rho>=1
             "ENDCOND_LIM_SIMTIME":10.0,
@@ -1064,10 +1128,10 @@ class Orbitkicks():
         pz = -rho_parallel*g/psi_w - psi_norm
 
         #DEBUGGING
-        A = -rho_parallel*g/psi_w
-        B = psi_norm
-        print('term A',A)
-        print('term B',B)
+        #A = -rho_parallel*g/psi_w
+        #B = psi_norm
+        #print('term A',A)
+        #print('term B',B)
     
         return pz
 
@@ -1241,6 +1305,43 @@ class Orbitkicks():
         
         return de_arr,dpz_arr
 
+        def get_pdedp_data(self,myfile=None):
+        """
+        Parameters
+        ----------
+        myfile : str or None
+            pDEDP AEP/UFILE.
+            If None, use self.pdedp and associated class attributes.
+
+        Return pDEDP data either from a supplied AEP file or from the
+        latest in-memory simkick result stored on this Orbitkicks object.
+        """
+        if myfile is not None:
+            return self.read_pdedp_ufile(myfile=myfile)
+
+        required_attrs = ["e_arr", "pz_arr", "mu_arr",
+                          "de_arr", "dpz_arr", "pdedp", "dtsamp"]
+
+        missing = [attr for attr in required_attrs
+                   if (not hasattr(self,attr)) or (getattr(self,attr) is None)]
+
+        if len(missing) > 0:
+            raise ValueError(
+                "No in-memory pDEDP data found on this Orbitkicks object. "
+                "Either run simkick() first, or pass myfile='pDEDP.AEP'. "
+                f"Missing attributes: {missing}")
+
+        data = {
+            "e_arr": np.asarray(self.e_arr,dtype=float),
+            "pz_arr": np.asarray(self.pz_arr,dtype=float),
+            "mu_arr": np.asarray(self.mu_arr,dtype=float),
+            "de_arr": np.asarray(self.de_arr,dtype=float),
+            "dpz_arr": np.asarray(self.dpz_arr,dtype=float),
+            "pdedp": np.asarray(self.pdedp,dtype=float),
+            "tsamp": float(self.dtsamp)}
+
+        return data
+
     def read_pdedp_ufile(self,myfile='pDEDP.AEP'):
         """
         Parameters
@@ -1408,7 +1509,7 @@ class Orbitkicks():
 
         #line 1
         f.write(' '+str(lshot)+dev+str(nd)+'  '+str(nq)+' '+str(nr)+'          ')
-        f.write(";-SHOT #- F(X) DATA -PDEDP_OUT- "+date+'\n')
+        f.write(";-SHOT #- F(X) DATA -PDEDP_OUT- "+'\n')
 
         #line 2
         f.write('  '+date+'             ')
@@ -1604,7 +1705,7 @@ class Orbitkicks():
 
             tag = ';-SHOT DATE-  UFILES ASCII FILE SYSTEM'
             f.write('  '+date+'             ')
-            #f.write(f' {date:>10}          {tag}\n')
+            f.write(f'{tag}\n')
 
             tag = ';-NUMBER OF ASSOCIATED SCALAR QUANTITIES-'
             f.write(f' {ns:3d}                    {tag}\n')
@@ -1808,7 +1909,7 @@ class Orbitkicks():
         #do something
 
         #DEBUGGING
-        print('test kick',dp,p1,p0)
+        #print('test kick',dp,p1,p0)
         if abs(np.mean(dp)) > 0.3:
             print("\nLarge DPz kick detected")
 
@@ -2066,8 +2167,8 @@ class Orbitkicks():
                 
         return marker
 
-    def calc_resfrac(self,myfile='pDEDP.AEP'):
-        data = self.read_pdedp_ufile(myfile=myfile)
+    def calc_resfrac(self,myfile=None):
+        data = self.get_pdedp_data(myfile=myfile)
         
         ne = len(data['e_arr'])
         npp = len(data['pz_arr'])
@@ -2082,30 +2183,36 @@ class Orbitkicks():
         pdedp = data['pdedp']
         ide0 = np.argmin(np.abs(de))
         idp0 = np.argmin(np.abs(dp))
-        CPdedp = np.sum(pdedp,axis=-2)
-        C2Pdedp = np.sum(pdedp,axis=-1)
+        P_dp = np.sum(pdedp,axis=-2)
+        P_de = np.sum(pdedp,axis=-1)
+        dedumpos = np.array([x if x>0.0 else 0.0 for x in de])
+        dedumneg = np.array([x if x<0.0 else 0.0 for x in de])
         for i in range(0,ne):
             for j in range(0,npp):
                 for k in range(0,nm):
-                    ttl = np.sum(CPdedp[i,j,k,:])
-                    ttl2 = np.sum(C2Pdedp[i,j,k,:])
-                    if ttl == 0:
-                        derms[i,j,k] = 0.0
-                        dprms[i,j,k] = 0.0
-                        asm[i,j,k] = 0.0
+                    ttl_de = np.sum(P_de[i,j,k,:])
+                    ttl_dp = np.sum(P_dp[i,j,k,:])
+                    ttl_full = np.sum(pdedp[i,j,k,:,:])
+                    
+                    if ttl_de == 0:
+                        #zero values
+                        continue
                     else:
-                        derms[i,j,k] = np.sum(np.abs(de*CPdedp[i,j,k,:]))/ttl
-                        dprms[i,j,k] = np.sum(np.abs(dp*C2Pdedp[i,j,k,:]))/ttl2
-                        dedumpos = np.array([x if x>0.0 else 0.0 for x in de])
-                        dedumneg = np.array([x if x<0.0 else 0.0 for x in de])
-                        depos = np.sum(dedumpos*CPdedp[i,j,k,:])
-                        deneg = np.sum(dedumneg*CPdedp[i,j,k,:])
+                        #derms[i,j,k] = np.sqrt(np.sum(np.abs(de)*P_de[i,j,k,:])/ttl_de)
+                        derms[i,j,k] = np.sum(np.abs(de)*P_de[i,j,k,:])/ttl_de
+
+                        depos = np.sum(dedumpos*P_de[i,j,k,:])
+                        deneg = np.sum(dedumneg*P_de[i,j,k,:])
+                        
                         if (np.abs(depos)>0) and (np.abs(deneg)>0):
                             asm[i,j,k] = 100*(depos+deneg)/(depos-deneg)
                         else:
                             asm[i,j,k] = 0.0
-                    if ttl > 0:
-                        resfrac[i,j,k] = 1.0-pdedp[i,j,k,ide0,idp0]/np.sum(pdedp[i,j,k,:,:])
+
+                        #dprms[i,j,k] = np.sqrt(np.sum(np.abs(dp)*P_dp[i,j,k,:])/ttl_dp)
+                        dprms[i,j,k] = np.sum(np.abs(dp)*P_dp[i,j,k,:])/ttl_dp
+                            
+                        resfrac[i,j,k] = 1.0-pdedp[i,j,k,ide0,idp0]/ttl_full
                             
         data = {'resfrac':resfrac,'derms':derms,'dprms':dprms,'asm':asm}
         return data
@@ -2113,7 +2220,7 @@ class Orbitkicks():
     def plot_quantity(self,
                       de=False,dp=False,
                       resfrac=False,asym=False,
-                      myfile='pDEDP.AEP',
+                      myfile=None,
                       nlevels=30,
                       cmap="viridis",
                       ncols=4,
@@ -2127,7 +2234,7 @@ class Orbitkicks():
             return
         
         #get data
-        data = self.read_pdedp_ufile(myfile=myfile)
+        data = self.get_pdedp_data(myfile=myfile)
         e_arr = np.asarray(data["e_arr"],dtype=float)
         pz_arr = np.asarray(data["pz_arr"],dtype=float)
         mu_arr = np.asarray(data["mu_arr"],dtype=float)
@@ -2135,12 +2242,12 @@ class Orbitkicks():
         dpz_arr = np.asarray(data["dpz_arr"],dtype=float)
         pdedp = np.asarray(data["pdedp"],dtype=float)
         dt = np.asarray(data["tsamp"],dtype=float)
-        tstep_str = str(round(data['tsamp']))
+        tstep_str = str(round(dt/1e-6,ndigits=1))
 
         #set new PZ and MU arrays for plot ranges
         ddp = (pz_arr[1]-pz_arr[0])/2.0
         ddm = (mu_arr[1]-mu_arr[0])/2.0
-        xr = [np.amin(pz_arr)-2*ddp,np.amax(dpz_arr)+2*ddp]
+        xr = [np.amin(pz_arr)-2*ddp,np.amax(pz_arr)+2*ddp]
         yr = [np.amin(mu_arr)-2*ddm,np.amax(mu_arr)+2*ddm]
 
         #make plot
@@ -2180,10 +2287,10 @@ class Orbitkicks():
             for j in range(0,ncols):
                 #make y-labels
                 if j == 0:
-                    axarr[i,j].set_ylabel(r'$\mathrm{\\mu B_0/E}$',fontsize=12)
+                    axarr[i,j].set_ylabel(r'$\mathrm{\mu B_0/E}$',fontsize=12)
                 #make x-labels
                 if i == nrows-1:
-                    axarr[i,j].set_xlabel(r'$\mathrm{P_{\\phi}}$',fontsize=12)
+                    axarr[i,j].set_xlabel(r'$\mathrm{P_{\phi}}$',fontsize=12)
 
                 #labelsizes
                 axarr[i,j].tick_params(axis='x',labelsize=10)
@@ -2198,8 +2305,8 @@ class Orbitkicks():
             if asym == True:
                 levels = np.linspace(-1*zmax,zmax,nlevels)
             else:
-                levels = np.linspace(1e-3,zmax,nlevels)
-
+                levels = np.linspace(1e-5,zmax,nlevels)
+            
             cs = axarr[row,col].contourf(pz_arr,mu_arr,vplot,
                                          levels=levels,cmap='jet')
             axarr[row,col].set_xlim(xr)
@@ -2213,7 +2320,7 @@ class Orbitkicks():
     def plot_kicks(self,
             mu_value,
             pz_value,
-            myfile='pDEDP.AEP',
+            myfile=None,
             nlevels=50,
             cmap="viridis",
             ncols=4,
@@ -2223,7 +2330,7 @@ class Orbitkicks():
         in one subplot grid.
         """
         #get data
-        data = self.read_pdedp_ufile(myfile=myfile)
+        data = self.get_pdedp_data(myfile=myfile)
         e_arr = np.asarray(data["e_arr"],dtype=float)
         pz_arr = np.asarray(data["pz_arr"],dtype=float)
         mu_arr = np.asarray(data["mu_arr"],dtype=float)
@@ -2231,7 +2338,7 @@ class Orbitkicks():
         dpz_arr = np.asarray(data["dpz_arr"],dtype=float)
         pdedp = np.asarray(data["pdedp"],dtype=float)
         dt = np.asarray(data["tsamp"],dtype=float)
-        tstep_str = str(round(data['tsamp']))
+        tstep_str = str(round(dt/1e-6,ndigits=1))
 
         #find (Pz,mu) to plot at
         ipz = int(np.argmin(np.abs(pz_arr - pz_value)))
@@ -2258,7 +2365,7 @@ class Orbitkicks():
                                  squeeze=False,sharex=True,sharey=True)
 
         #plot title
-        fig.suptitle(r'$\mathrm{Kick: \, P_{\\phi}=%s, \, \\mu=%s}$' %
+        fig.suptitle(r'$\mathrm{Kick: \, P_{\phi}=%s, \, \mu=%s}$' %
                      (round(pz_used,2),round(mu_used,2)),fontsize=12)
 
         #make plot labels
@@ -2266,11 +2373,11 @@ class Orbitkicks():
             for j in range(0,ncols):
                 #make y-labels
                 if j == 0:
-                    axarr[i,j].set_ylabel(r'$\mathrm{\\Delta P_{\\phi} (1/%s \\mu s)}$'%tstep_str,
+                    axarr[i,j].set_ylabel(r'$\mathrm{\Delta P_{\phi} (1/%s \mu s)}$'%tstep_str,
                                           fontsize=12)
                 #make x-labels
                 if i == nrows-1:
-                    axarr[i,j].set_xlabel(r'$\mathrm{\\Delta E \, (keV/%s \\mu s)}$'%tstep_str,
+                    axarr[i,j].set_xlabel(r'$\mathrm{\Delta E \, (keV/%s \mu s)}$'%tstep_str,
                                           fontsize=12)
 
                 #labelsizes
