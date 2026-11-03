@@ -205,13 +205,14 @@ class Orbitkicks():
         mode_period = 2.0*np.pi/omega #sec
         dtsamp = 1.05*mode_period #sec
         tsim = dtsamp*nperiods
-
+        
         #check for too short smoothing time
         if dtav > 0.3*dtsamp:
             raise ValueError('Smoothing time too long compared to dtsamp')
-
+        
         #set orbitwrite interval to have sufficient averaging
         ow_int = min(dtav/10.0,dtsamp/20.0)
+        #ow_int = dtsamp/2.0
 
         #get number of orbitwrite npoints from orbitwrite interval
         ow_npoint = int(np.ceil(1.2*tsim/ow_int))+10
@@ -230,7 +231,7 @@ class Orbitkicks():
             print('Full orbit simulation'+'\n')
 
         #print rough storage for marker data
-        n_orbit_fields = 16
+        n_orbit_fields = 10
         mem = 8*nprt*ow_npoint*n_orbit_fields/1e9
         print('Rough memory usage for marker data: '+str(mem)+' GB'+'\n')
 
@@ -291,8 +292,7 @@ class Orbitkicks():
             nmpi = int(os.environ.get("SLURM_NTASKS","1"))
             command=["mpirun","-np",str(nmpi),ascot_mpi_exe,f"--in={loop_h5file}"]
             try:
-                result = subprocess.run(command,check=True,cwd=base_dir,
-                                        capture_output=True,text=True)
+                result = subprocess.run(command,check=True,cwd=base_dir)
             except subprocess.CalledProcessError as e:
                 print("MPI FAILED WITH EXIT CODE:", e.returncode,flush=True)
                 print(e.stdout,flush=True)
@@ -507,27 +507,25 @@ class Orbitkicks():
 
             #use most recent run
             run_name = list(f["results"].keys())[-1]
-
-            #get all orbit data
-            orbit = f["results"][run_name]["orbit"]
         
             #make sure needed quantities exist
             required = ["ids","mileage","r","z","mu","ppar","br","bphi","bz"]
-            missing = [k for k in required if k not in orbit]
+            missing = [k for k in required if k not in
+                       f["results"][run_name]["orbit"].keys()]
             if len(missing) > 0:
                 raise KeyError(f"Missing orbit datasets {missing}. "
                                f"Available keys are {list(orbit.keys())}")
 
             #save needed orbit values
-            ids   = orbit["ids"][()]
-            torb  = orbit["mileage"][()]
-            rorb  = orbit["r"][()]
-            zorb  = orbit["z"][()]
-            muorb = orbit["mu"][()]
-            ppar  = orbit["ppar"][()]
-            br    = orbit["br"][()]
-            bphi  = orbit["bphi"][()]
-            bz    = orbit["bz"][()]
+            ids   = f["results"][run_name]["orbit"]["ids"][()]
+            torb  = f["results"][run_name]["orbit"]["mileage"][()]
+            rorb  = f["results"][run_name]["orbit"]["r"][()]
+            zorb  = f["results"][run_name]["orbit"]["z"][()]
+            muorb = f["results"][run_name]["orbit"]["mu"][()]
+            ppar  = f["results"][run_name]["orbit"]["ppar"][()]
+            br    = f["results"][run_name]["orbit"]["br"][()]
+            bphi  = f["results"][run_name]["orbit"]["bphi"][()]
+            bz    = f["results"][run_name]["orbit"]["bz"][()]
 
         #Convert to arrays
         ids   = np.asarray(ids,dtype=int)
@@ -591,28 +589,26 @@ class Orbitkicks():
 
             #use most recent run
             run_name = list(f["results"].keys())[-1]
-
-            #get all orbit data
-            orbit = f["results"][run_name]["orbit"]
         
             #make sure needed quantities exist
             required = ["ids","mileage","r","z","pr","pphi","pz","br","bphi","bz"]
-            missing = [k for k in required if k not in orbit]
+            missing = [k for k in required if k not in
+                       f["results"][run_name]["orbit"].keys()]
             if len(missing) > 0:
                 raise KeyError(f"Missing orbit datasets {missing}. "
                                f"Available keys are {list(orbit.keys())}")
 
             #save needed orbit values
-            ids   = orbit["ids"][()]
-            torb  = orbit["mileage"][()]
-            rorb  = orbit["r"][()]
-            zorb  = orbit["z"][()]
-            pr  = orbit["pr"][()]
-            pphi  = orbit["pphi"][()]
-            pz  = orbit["pz"][()]
-            br    = orbit["br"][()]
-            bphi  = orbit["bphi"][()]
-            bz    = orbit["bz"][()]
+            ids   = f["results"][run_name]["orbit"]["ids"][()]
+            torb  = f["results"][run_name]["orbit"]["mileage"][()]
+            rorb  = f["results"][run_name]["orbit"]["r"][()]
+            zorb  = f["results"][run_name]["orbit"]["z"][()]
+            pr  = f["results"][run_name]["orbit"]["pr"][()]
+            pphi  = f["results"][run_name]["orbit"]["pphi"][()]
+            pz  = f["results"][run_name]["orbit"]["pz"][()]
+            br    = f["results"][run_name]["orbit"]["br"][()]
+            bphi  = f["results"][run_name]["orbit"]["bphi"][()]
+            bz    = f["results"][run_name]["orbit"]["bz"][()]
 
         #Convert to arrays
         ids   = np.asarray(ids,dtype=int)
@@ -697,8 +693,8 @@ class Orbitkicks():
             "SIM_MODE":sim_mode,
             "ENABLE_ADAPTIVE":0,
             "RECORD_MODE":rec_mode,
-            "FIXEDSTEP_USE_USERDEFINED":1,
-            "FIXEDSTEP_USERDEFINED":1e-10,
+            "FIXEDSTEP_USE_USERDEFINED":0,
+            "FIXEDSTEP_USERDEFINED":1e-9,
             "FIXEDSTEP_GYRODEFINED":20,
             "ENDCOND_SIMTIMELIM":1, #end at max mileage
             "ENDCOND_RHOLIM":1, #end at rho>=1
@@ -1305,7 +1301,7 @@ class Orbitkicks():
         
         return de_arr,dpz_arr
 
-        def get_pdedp_data(self,myfile=None):
+    def get_pdedp_data(self,myfile=None):
         """
         Parameters
         ----------
@@ -1332,13 +1328,13 @@ class Orbitkicks():
                 f"Missing attributes: {missing}")
 
         data = {
-            "e_arr": np.asarray(self.e_arr,dtype=float),
-            "pz_arr": np.asarray(self.pz_arr,dtype=float),
-            "mu_arr": np.asarray(self.mu_arr,dtype=float),
-            "de_arr": np.asarray(self.de_arr,dtype=float),
-            "dpz_arr": np.asarray(self.dpz_arr,dtype=float),
-            "pdedp": np.asarray(self.pdedp,dtype=float),
-            "tsamp": float(self.dtsamp)}
+            "e_arr":np.asarray(self.e_arr,dtype=float),
+            "pz_arr":np.asarray(self.pz_arr,dtype=float),
+            "mu_arr":np.asarray(self.mu_arr,dtype=float),
+            "de_arr":np.asarray(self.de_arr,dtype=float),
+            "dpz_arr":np.asarray(self.dpz_arr,dtype=float),
+            "pdedp":np.asarray(self.pdedp,dtype=float),
+            "tsamp":float(self.dtsamp)}
 
         return data
 
@@ -1974,6 +1970,243 @@ class Orbitkicks():
         print('Finished recording pDEDP to 5D matrix'+'\n')
         
         return
+
+    def uni_mrk_E_mu_Pz_deposit(self,bstr,
+                                emin_keV=1.0,emax_keV=150.0,
+                                mu_min=0.0,mu_max=1.4,
+                                pz_min=-1.2,pz_max=1.0,
+                                limit_psi=0.95,
+                                anum=2,znum=1,
+                                nprt=10000,seed=None,
+                                max_tries_per_marker=200):
+        """
+        Generate GC markers approximately uniform in normalized
+        (E, mu, Pz) phase space.
+
+        E is sampled uniformly in keV.
+        mu is sampled uniformly as mu_norm = mu*B0/E.
+        Pz is sampled uniformly in the ORBIT/AEP normalized Pz convention.
+
+        The marker position is found by inverting Pz along either the
+        outer-midplane positive-pitch branch or the inner-midplane
+        negative-pitch branch.
+
+        Returns
+        -------
+        marker : dict
+            ASCOT guiding-center marker dictionary.
+        """
+
+        rng = np.random.default_rng(seed)
+
+        #Storage
+        r_out = np.zeros(nprt)
+        z_out = np.zeros(nprt)
+        energy_eV_out = np.zeros(nprt)
+        pitch_out = np.zeros(nprt)
+        zeta_out = np.zeros(nprt)
+        phi_out = np.zeros(nprt)
+
+        b0 = float(bstr["bcenter"])
+        zaxis = float(bstr["zaxis"])
+
+        #Branches from get_kick_bfield().
+        branches = [{"name": "outer","sign": +1.0,"data": bstr["outer"],},
+                    {"name": "inner","sign": -1.0,"data": bstr["inner"],}]
+
+        #Clean and pre-sort branch arrays.
+        for br in branches:
+            dat = br["data"]
+
+            psi_norm = np.asarray(dat["psi_norm"], dtype=float)
+            psi_abs  = np.asarray(dat["psi"], dtype=float)
+            r_branch = np.asarray(dat["r"], dtype=float)
+            b_branch = np.asarray(dat["btot"], dtype=float)
+
+            good = (
+                np.isfinite(psi_norm)
+                & np.isfinite(psi_abs)
+                & np.isfinite(r_branch)
+                & np.isfinite(b_branch)
+                & (psi_norm >= 0.0)
+                & (psi_norm <= limit_psi)
+            )
+
+            psi_norm = psi_norm[good]
+            psi_abs  = psi_abs[good]
+            r_branch = r_branch[good]
+            b_branch = b_branch[good]
+
+            order = np.argsort(psi_norm)
+
+            br["psi_norm"] = psi_norm[order]
+            br["psi_abs"]  = psi_abs[order]
+            br["r"]        = r_branch[order]
+            br["btot"]     = b_branch[order]
+
+            if len(br["psi_norm"]) < 2:
+                raise ValueError(
+                    f"Branch {br['name']} has fewer than 2 valid points."
+                )
+
+        n_accept = 0
+        n_try_total = 0
+
+        while n_accept < nprt:
+
+            accepted = False
+
+            for _ in range(max_tries_per_marker):
+                n_try_total += 1
+
+                # Uniform target variables.
+                energy_keV = emin_keV + rng.random()*(emax_keV - emin_keV)
+                mu_t = mu_min + rng.random()*(mu_max - mu_min)
+                pz_t = pz_min + rng.random()*(pz_max - pz_min)
+
+                # Choose branch randomly.
+                br = branches[rng.integers(0,2)]
+                sgn = br["sign"]
+
+                psi_abs_grid = br["psi_abs"]
+                r_grid = br["r"]
+                b_grid = br["btot"]
+
+                # Convert E to ORBIT-normalized energy.
+                eprime = self.energy_prime(
+                    energy_keV,
+                    bstr,
+                    anum=anum,
+                    znum=znum
+                )
+
+                # From mu_norm = (B0/B)*(1 - pitch^2),
+                # pitch^2 = 1 - mu_norm*B/B0.
+                pitch2_grid = 1.0 - mu_t*b_grid/b0
+
+                valid = (
+                    np.isfinite(pitch2_grid)
+                    & (pitch2_grid >= 0.0)
+                    & (pitch2_grid <= 1.0)
+                )
+
+                if np.count_nonzero(valid) < 2:
+                    continue
+
+                psi_v = psi_abs_grid[valid]
+                r_v = r_grid[valid]
+                b_v = b_grid[valid]
+                pitch_v = sgn*np.sqrt(pitch2_grid[valid])
+
+                eprime_v = np.full_like(pitch_v, eprime, dtype=float)
+
+                # Use the same Pz convention as the kick code.
+                pz_v = self.calc_pz_orbit(
+                    eprime=eprime_v,
+                    pitch=pitch_v,
+                    bnorm=b_v,
+                    psi=psi_v,
+                    bstr=bstr
+                )
+
+                good_pz = np.isfinite(pz_v)
+
+                if np.count_nonzero(good_pz) < 2:
+                    continue
+
+                psi_v = psi_v[good_pz]
+                r_v = r_v[good_pz]
+                b_v = b_v[good_pz]
+                pitch_v = pitch_v[good_pz]
+                pz_v = pz_v[good_pz]
+
+                # Find intervals where pz_v crosses pz_t.
+                f = pz_v - pz_t
+
+                crossing = np.where(f[:-1]*f[1:] <= 0.0)[0]
+
+                if len(crossing) == 0:
+                    continue
+
+                # If multiple crossings exist, choose one randomly.
+                ic = crossing[rng.integers(0,len(crossing))]
+
+                f0 = f[ic]
+                f1 = f[ic+1]
+
+                if f1 == f0:
+                    alpha = 0.5
+                else:
+                    alpha = -f0/(f1 - f0)
+
+                alpha = np.clip(alpha,0.0,1.0)
+
+                r_m = r_v[ic] + alpha*(r_v[ic+1] - r_v[ic])
+                pitch_m = pitch_v[ic] + alpha*(pitch_v[ic+1] - pitch_v[ic])
+
+                # Store marker.
+                r_out[n_accept] = r_m
+                z_out[n_accept] = zaxis
+                energy_eV_out[n_accept] = energy_keV*1.0e3
+                pitch_out[n_accept] = pitch_m
+                phi_out[n_accept] = rng.random()*360.0
+                zeta_out[n_accept] = rng.random()*2.0*np.pi
+
+                accepted = True
+                break
+
+            if not accepted:
+                raise RuntimeError(
+                    "Failed to generate marker uniformly in (E,mu,Pz). "
+                    f"Accepted {n_accept}/{nprt}. "
+                    "Your requested (mu,Pz) box may include too much "
+                    "unreachable phase space. Try narrowing mu/pz ranges."
+                )
+
+            n_accept += 1
+
+            if n_accept % 10000 == 0:
+                print(
+                    f"Generated {n_accept}/{nprt} uniform (E,mu,Pz) markers",
+                    flush=True
+                )
+
+        print(
+            "Uniform (E,mu,Pz) marker generation complete. "
+            f"Acceptance fraction = {nprt/n_try_total:.4f}",
+            flush=True
+        )
+
+        # Species and marker metadata.
+        ids = np.arange(1,nprt+1,dtype=int)
+        weight = np.ones(nprt)
+        time = np.zeros(nprt)
+
+        anum_arr = np.full(nprt,anum,dtype=int)
+        znum_arr = np.full(nprt,znum,dtype=int)
+
+        mass_amu = anum*MP/AMU
+        mass = np.full(nprt,mass_amu)
+        charge = np.full(nprt,znum)
+
+        marker = {
+            "n": nprt,
+            "ids": ids,
+            "mass": mass*u.amu,
+            "charge": charge*u.e,
+            "r": r_out*u.m,
+            "phi": phi_out*u.degree,
+            "z": z_out*u.m,
+            "energy": energy_eV_out*u.eV,
+            "pitch": pitch_out,
+            "zeta": zeta_out*u.rad,
+            "anum": anum_arr,
+            "znum": znum_arr,
+            "weight": weight/u.s,
+            "time": time*u.s,
+        }
+
+        return marker
 
     def uni_mrk_orbit_deposit(self,bstr,emin_keV=1.0,emax_keV=150.0,
                               limit_psi=0.95,anum=2,znum=1,
